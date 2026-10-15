@@ -1,0 +1,16 @@
+services:
+  timeline:
+    build:
+      context: .
+      dockerfile: timeline/Dockerfile
+    image: images-on-timeline
+    environment:
+      LIBRARY_ROOT: /host
+      HOST_ROOT_LABEL: ${HOST_LIBRARY_ROOT:-${HOME}}
+      PORT: "8080"
+    volumes:
+      - ${HOST_LIBRARY_ROOT:-${HOME}}/Documents:/host/Documents:ro
+      - ${HOST_LIBRARY_ROOT:-${HOME}}/Pictures:/host/Pictures:ro
+      - ${HOST_LIBRARY_ROOT:-${HOME}}/Desktop:/host/Desktop:ro
+    ports:
+      - "8080:8080"

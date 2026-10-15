@@ -4,10 +4,14 @@ services:
       context: .
       dockerfile: timeline/Dockerfile
     image: images-on-timeline
+    depends_on:
+      database:
+        condition: service_healthy
     environment:
       LIBRARY_ROOT: /host
       HOST_ROOT_LABEL: ${HOST_LIBRARY_ROOT:-${HOME}}
       PORT: "8080"
+      DATABASE_URL: postgres://greptime@database:4003/public
     volumes:
       - ${HOST_LIBRARY_ROOT:-${HOME}}/Documents:/host/Documents:ro
       - ${HOST_LIBRARY_ROOT:-${HOME}}/Pictures:/host/Pictures:ro

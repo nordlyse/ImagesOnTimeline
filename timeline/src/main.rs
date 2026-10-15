@@ -1,6 +1,7 @@
 mod files;
 mod library;
 mod scan;
+mod store;
 
 use std::env;
 use std::io::{Read, Write};
@@ -16,6 +17,7 @@ use chrono::SecondsFormat;
 use crate::files::read_picture;
 use crate::library::{display_label, list_folders, resolve_folder, FolderView};
 use crate::scan::{scan_folder, Picture};
+use crate::store::{fresh_pictures, Catalog};
 
 const INDEX_HTML: &str = include_str!("../static/index.html");
 const APP_CSS: &str = include_str!("../static/app.css");
@@ -29,6 +31,7 @@ struct AppState {
 struct Inner {
     library_root: PathBuf,
     host_label: String,
+    catalog: Option<Catalog>,
     library: Mutex<Library>,
 }
 
@@ -60,10 +63,21 @@ fn main() -> ExitCode {
     let library_root = PathBuf::from(env::var("LIBRARY_ROOT").unwrap_or_else(|_| "/host".to_string()));
     let host_label = env::var("HOST_ROOT_LABEL").unwrap_or_default();
     let port = env::var("PORT").unwrap_or_else(|_| "8080".to_string());
+    let catalog = env::var("DATABASE_URL").ok().and_then(|url| match Catalog::parse(&url) {
+        Some(catalog) => {
+            eprintln!("picture catalog at {}", catalog.label());
+            Some(catalog)
+        }
+        None => {
+            eprintln!("DATABASE_URL is not a postgres address");
+            None
+        }
+    });
     let state = AppState {
         inner: Arc::new(Inner {
             library_root,
             host_label,
+            catalog,
             library: Mutex::new(Library {
                 label: None,
                 pictures: Vec::new(),
@@ -168,7 +182,12 @@ fn choose_library(state: &AppState, body: &[u8]) -> Outgoing {
         return text(400, "Choose a folder.");
     };
     eprintln!("show folder {requested}");
-    let scanned = match scan_chosen(&state.inner.library_root, &state.inner.host_label, &requested) {
+    let scanned = match scan_chosen(
+        &state.inner.library_root,
+        &state.inner.host_label,
+        &requested,
+        state.inner.catalog.as_ref(),
+    ) {
         Ok(scanned) => scanned,
         Err(message) => return text(400, &message),
     };
@@ -198,10 +217,13 @@ fn picture_list(state: &AppState) -> Outgoing {
         }
         let captured_at = picture.captured_at.to_rfc3339_opts(SecondsFormat::Secs, true);
         body.push_str(&format!(
-            "{{\"id\":{},\"captured_at\":{},\"name\":{}}}",
+            "{{\"id\":{},\"captured_at\":{},\"name\":{},\"latitude\":{},\"longitude\":{},\"place\":{}}}",
             picture.id,
             json_string(&captured_at),
-            json_string(&picture.name)
+            json_string(&picture.name),
+            json_number(picture.latitude),
+            json_number(picture.longitude),
+            json_optional(picture.place.as_deref())
         ));
     }
     body.push(']');
@@ -234,14 +256,57 @@ fn picture_file(state: &AppState, id: i64) -> Outgoing {
     }
 }
 
-fn scan_chosen(library_root: &Path, host_label: &str, requested: &str) -> Result<ScannedFolder, String> {
+fn scan_chosen(
+    library_root: &Path,
+    host_label: &str,
+    requested: &str,
+    catalog: Option<&Catalog>,
+) -> Result<ScannedFolder, String> {
     let folder = resolve_folder(library_root, host_label, requested)?;
     let root = library_root
         .canonicalize()
         .unwrap_or_else(|_| library_root.to_path_buf());
+    let folder_key = folder.to_string_lossy().into_owned();
+    let mut known = std::collections::HashMap::new();
+    let mut session = match catalog {
+        Some(catalog) => match catalog.open() {
+            Ok(mut session) => match session.prepare() {
+                Ok(()) => Some(session),
+                Err(err) => {
+                    eprintln!("picture catalog prepare stopped: {err}");
+                    None
+                }
+            },
+            Err(err) => {
+                eprintln!("picture catalog connection stopped: {err}");
+                None
+            }
+        },
+        None => None,
+    };
+    if let Some(session) = session.as_mut() {
+        match session.load_folder(&folder_key) {
+            Ok(stored) => {
+                eprintln!("picture catalog has {} stored names in {folder_key}", stored.len());
+                known = stored;
+            }
+            Err(err) => eprintln!("picture catalog read stopped: {err}"),
+        }
+    }
+    let pictures = scan_folder(&folder, &known);
+    if let Some(session) = session.as_mut() {
+        let fresh = fresh_pictures(&pictures, &known);
+        if fresh.is_empty() {
+            eprintln!("picture catalog already holds every name in {folder_key}");
+        } else if let Err(err) = session.save_pictures(&folder_key, &fresh) {
+            eprintln!("picture catalog save stopped: {err}");
+        } else {
+            eprintln!("picture catalog stored {} new names in {folder_key}", fresh.len());
+        }
+    }
     Ok(ScannedFolder {
         label: display_label(&root, host_label, &folder),
-        pictures: scan_folder(&folder),
+        pictures,
     })
 }
 
@@ -417,6 +482,20 @@ fn json_path(body: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn json_number(value: Option<f64>) -> String {
+    match value {
+        Some(value) if value.is_finite() => format!("{value:.6}"),
+        _ => "null".to_string(),
+    }
+}
+
+fn json_optional(value: Option<&str>) -> String {
+    match value {
+        Some(value) => json_string(value),
+        None => "null".to_string(),
+    }
 }
 
 fn json_string(value: &str) -> String {

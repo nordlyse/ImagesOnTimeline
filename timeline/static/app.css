@@ -426,7 +426,7 @@ h1 {
   z-index: 0;
   left: 0;
   right: 0;
-  top: 6px;
+  top: -3px;
   height: 24px;
   margin: 0;
   pointer-events: none;

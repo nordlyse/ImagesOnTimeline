@@ -1,0 +1,31 @@
+---
+description: Nordlyse project standards for licences, git identity, English text, and wording
+alwaysApply: true
+---
+
+# Nordlyse standards
+
+These rules apply to every change in this project.
+
+## Licences
+
+- Third-party libraries, tools, and runtime dependencies must be MIT or Apache-2.0 only.
+- Do not add GPL, proprietary, or other licences. If a needed library is not MIT or Apache-2.0, pick an MIT or Apache-2.0 alternative or ask.
+
+## Git identity
+
+- Push only as the nordlyse account (jakob.lyse).
+- Author and committer: Jakob Lyse <jakob.lyse@gmail.com>.
+- Never add Co-authored-by Cursor, cursoragent, or any other agent identity.
+- On every push, check author, committer, and trailers before pushing. If another identity would appear, strip it first, then push as nordlyse.
+
+## Language
+
+- Comments, class names, README, docs, and commit messages are English.
+- Chat replies may follow the user's language.
+
+## Wording
+
+- Do not use the word "create" in method names, class names, comments, README, docs, or commit messages.
+- Use "add" or "insert" instead.
+- Framework APIs that require that word may stay (for example document.createElement, Files.createDirectories).

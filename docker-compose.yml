@@ -14,3 +14,30 @@ services:
       - ${HOST_LIBRARY_ROOT:-${HOME}}/Desktop:/host/Desktop:ro
     ports:
       - "8080:8080"
+
+  database:
+    image: greptime/greptimedb:v1.2.1
+    command:
+      - standalone
+      - start
+      - --http-addr
+      - 0.0.0.0:4000
+      - --grpc-bind-addr
+      - 0.0.0.0:4001
+      - --mysql-addr
+      - 0.0.0.0:4002
+      - --postgres-addr
+      - 0.0.0.0:4003
+    volumes:
+      - database_data:/greptimedb_data
+    ports:
+      - "4003:4003"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/127.0.0.1/4003'"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 15s
+
+volumes:
+  database_data:

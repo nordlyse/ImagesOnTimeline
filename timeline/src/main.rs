@@ -187,15 +187,22 @@ fn choose_library(state: &AppState, body: &[u8]) -> Outgoing {
     if body.len() > 8192 {
         return text(400, "The folder request is too large.");
     }
-    let Some(requested) = json_path(&String::from_utf8_lossy(body)) else {
+    let payload = String::from_utf8_lossy(body);
+    let Some(requested) = json_path(&payload) else {
         return text(400, "Choose a folder.");
     };
-    eprintln!("show folder {requested}");
+    let rescan = json_flag(&payload, "rescan");
+    if rescan {
+        eprintln!("scan folder {requested}");
+    } else {
+        eprintln!("show folder {requested}");
+    }
     let scanned = match scan_chosen(
         &state.inner.library_root,
         &state.inner.host_label,
         &requested,
         state.inner.catalog.as_ref(),
+        rescan,
     ) {
         Ok(scanned) => scanned,
         Err(message) => return text(400, &message),
@@ -277,6 +284,7 @@ fn scan_chosen(
     host_label: &str,
     requested: &str,
     catalog: Option<&Catalog>,
+    rescan: bool,
 ) -> Result<ScannedFolder, String> {
     let folder = resolve_folder(library_root, host_label, requested)?;
     let root = library_root
@@ -285,8 +293,9 @@ fn scan_chosen(
     let folder_key = folder.to_string_lossy().into_owned();
     let label = display_label(&root, host_label, &folder);
     let mut session = catalog.and_then(open_catalog);
-    if let Some(session) = session.as_mut() {
-        if let Some(stored) = remembered_folder(session, &folder_key) {
+    if !rescan {
+        if let Some(session) = session.as_mut() {
+            if let Some(stored) = remembered_folder(session, &folder_key) {
             eprintln!(
                 "opened stored folder {folder_key} with {} pictures",
                 stored.pictures.len()
@@ -297,6 +306,7 @@ fn scan_chosen(
                 reused: true,
                 pictures: stored.pictures,
             });
+            }
         }
     }
     let known = match session.as_mut() {
@@ -313,14 +323,30 @@ fn scan_chosen(
     let scanned_at = Utc::now();
     if let Some(session) = session.as_mut() {
         let fresh = fresh_pictures(&pictures, &known);
-        if fresh.is_empty() {
+        let stored = if rescan {
+            if let Err(err) = session.clear_pictures(&folder_key) {
+                eprintln!("picture catalog clear stopped: {err}");
+                false
+            } else if let Err(err) = session.save_pictures(&folder_key, &pictures.iter().collect::<Vec<_>>()) {
+                eprintln!("picture catalog save stopped: {err}");
+                false
+            } else {
+                eprintln!("picture catalog stored the new scan for {folder_key}");
+                true
+            }
+        } else if fresh.is_empty() {
             eprintln!("picture catalog already holds every name in {folder_key}");
+            true
         } else if let Err(err) = session.save_pictures(&folder_key, &fresh) {
             eprintln!("picture catalog save stopped: {err}");
+            false
         } else {
             eprintln!("picture catalog stored {} new names in {folder_key}", fresh.len());
-        }
-        if let Err(err) = session.save_scan(&folder_key, scanned_at, pictures.len() as i64) {
+            true
+        };
+        if !stored {
+            eprintln!("picture catalog kept the previous folder scan for {folder_key}");
+        } else if let Err(err) = session.save_scan(&folder_key, scanned_at, pictures.len() as i64) {
             eprintln!("picture catalog folder save stopped: {err}");
         } else {
             eprintln!("picture catalog stored the folder scan for {folder_key}");
@@ -613,6 +639,18 @@ fn url_decode(value: &str) -> String {
         index += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+fn json_flag(body: &str, key: &str) -> bool {
+    let needle = format!("\"{key}\"");
+    let Some(index) = body.find(&needle) else {
+        return false;
+    };
+    let rest = body[index + needle.len()..].trim_start();
+    let Some(rest) = rest.strip_prefix(':') else {
+        return false;
+    };
+    rest.trim_start().starts_with("true")
 }
 
 fn json_path(body: &str) -> Option<String> {

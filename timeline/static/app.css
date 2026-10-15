@@ -84,6 +84,7 @@ h1 {
 
 #library-open,
 .library-actions button,
+#library-rescan,
 .folder-choice,
 #step-back,
 #step-forward {
@@ -162,12 +163,16 @@ h1 {
   text-align: left;
 }
 
-.library-actions {
+.library-actions,
+#library-scan {
   display: flex;
   justify-content: center;
+  align-items: center;
   flex-wrap: wrap;
   gap: 0.5rem;
 }
+
+#library-rescan[hidden] { display: none; }
 
 #stage {
   flex: 1;

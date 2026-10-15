@@ -185,6 +185,7 @@ function bindLibrary() {
   const closeButton = document.querySelector("#library-close");
   const upButton = document.querySelector("#library-up");
   const useButton = document.querySelector("#library-use");
+  const rescanButton = document.querySelector("#library-rescan");
   const pathLabel = document.querySelector("#library-path");
   const list = document.querySelector("#library-list");
   const status = document.querySelector("#library-status");
@@ -200,7 +201,8 @@ function bindLibrary() {
   upButton.addEventListener("click", () => {
     if (parentLabel != null) showFolders(parentLabel);
   });
-  useButton.addEventListener("click", () => showFolder(currentLabel));
+  useButton.addEventListener("click", () => showFolder(currentLabel, false));
+  rescanButton.addEventListener("click", () => showFolder(currentLabel, true));
   dialog.addEventListener("click", (event) => {
     if (event.target === dialog) dialog.hidden = true;
   });
@@ -238,7 +240,8 @@ function bindLibrary() {
     parentLabel = view.parent;
     pathLabel.textContent = view.label;
     upButton.disabled = view.parent == null;
-    if (view.scanned_at) status.textContent = `Scanned ${formatDay(view.scanned_at)}`;
+    rescanButton.hidden = !view.scanned_at;
+    if (view.scanned_at) status.textContent = `Scanned ${formatScan(view.scanned_at)}`;
     list.replaceChildren();
     if (view.entries.length === 0) {
       const note = document.createElement("p");
@@ -257,18 +260,20 @@ function bindLibrary() {
     }
   }
 
-  async function showFolder(label) {
+  async function showFolder(label, rescan) {
     if (busy) return;
     busy = true;
     useButton.disabled = true;
-    status.textContent = "Opening folder";
+    rescanButton.disabled = true;
+    status.textContent = rescan ? "Scanning folder" : "Opening folder";
     const response = await fetch("/api/library", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path: label }),
+      body: JSON.stringify({ path: label, rescan }),
     });
     busy = false;
     useButton.disabled = false;
+    rescanButton.disabled = false;
     if (!response.ok) {
       status.textContent = await response.text();
       return;
@@ -300,7 +305,19 @@ async function loadPictures() {
 function pictureSummary(count) {
   const text = count === 1 ? "1 picture" : `${count} pictures`;
   if (!scannedAt) return text;
-  return `${text}, scanned ${formatDay(scannedAt)}`;
+  return `${text}, scanned ${formatScan(scannedAt)}`;
+}
+
+function formatScan(value) {
+  const when = new Date(value);
+  if (Number.isNaN(when.getTime())) return value;
+  return when.toLocaleString("en-GB", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 function folderName(label) {

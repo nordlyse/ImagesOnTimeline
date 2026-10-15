@@ -118,6 +118,11 @@ impl Session {
         Ok(rows.into_iter().find_map(|row| parse_scan(&row)))
     }
 
+    pub fn clear_pictures(&mut self, folder: &str) -> Result<(), String> {
+        self.query(&format!("DELETE FROM picture WHERE folder = {}", sql_string(folder)))
+            .map(|_| ())
+    }
+
     pub fn save_scan(&mut self, folder: &str, scanned_at: DateTime<Utc>, picture_count: i64) -> Result<(), String> {
         let when = scanned_at.format("%Y-%m-%d %H:%M:%S");
         let sql = format!(

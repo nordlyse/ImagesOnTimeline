@@ -239,24 +239,33 @@ h1 {
   box-shadow: 0 16px 40px rgba(0, 0, 0, 0.38);
 }
 
-@property --rainbow-turn {
-  syntax: "<angle>";
-  inherits: false;
-  initial-value: 0deg;
-}
-
-.frame[aria-current="true"] .shot {
-  --rainbow-turn: 0deg;
-  animation: rainbow-turn 24s linear infinite;
-}
-
-.frame[aria-current="true"] .shot::before,
-.frame[aria-current="true"] .shot::after {
-  content: "";
+.rainbow-glow,
+.rainbow-ring {
   position: absolute;
   z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.rainbow-glow {
+  inset: -14px;
+  border-radius: 26px;
+  animation: rainbow-breathe-glow 2.8s ease-in-out infinite;
+}
+
+.rainbow-ring {
+  inset: -6px;
+  border-radius: 18px;
+  animation: rainbow-breathe 2.8s ease-in-out infinite;
+}
+
+.rainbow-spin {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 220%;
+  height: 220%;
   background: conic-gradient(
-    from var(--rainbow-turn),
     #ff4b4b,
     #ff9a2e,
     #ffe14a,
@@ -267,19 +276,7 @@ h1 {
     #ff4d9a,
     #ff4b4b
   );
-  pointer-events: none;
-  animation: rainbow-breathe 2.8s ease-in-out infinite;
-}
-
-.frame[aria-current="true"] .shot::before {
-  inset: -12px;
-  border-radius: 24px;
-  filter: blur(12px);
-}
-
-.frame[aria-current="true"] .shot::after {
-  inset: -6px;
-  border-radius: 18px;
+  animation: rainbow-spin 24s linear infinite;
 }
 
 .frame[aria-current="true"] img {
@@ -288,17 +285,14 @@ h1 {
   border-color: #0e0d14;
 }
 
-@keyframes rainbow-turn {
-  to { --rainbow-turn: 360deg; }
+@keyframes rainbow-spin {
+  from { transform: translate(-50%, -50%) rotate(0deg); }
+  to { transform: translate(-50%, -50%) rotate(-360deg); }
 }
 
 @keyframes rainbow-breathe {
   0%, 100% { opacity: 0.72; filter: brightness(0.82); }
   50% { opacity: 1; filter: brightness(1.18); }
-}
-
-.frame[aria-current="true"] .shot::before {
-  animation-name: rainbow-breathe-glow;
 }
 
 @keyframes rainbow-breathe-glow {
@@ -307,9 +301,9 @@ h1 {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .frame[aria-current="true"] .shot,
-  .frame[aria-current="true"] .shot::before,
-  .frame[aria-current="true"] .shot::after {
+  .rainbow-glow,
+  .rainbow-ring,
+  .rainbow-spin {
     animation: none;
   }
 }

@@ -114,6 +114,9 @@ function paint() {
     image.src = `/api/pictures/${picture.id}/file`;
     const shot = document.createElement("div");
     shot.className = "shot";
+    if (position === index) {
+      shot.append(rainbowLayer("rainbow-glow"), rainbowLayer("rainbow-ring"));
+    }
     shot.append(image);
     const caption = document.createElement("span");
     caption.textContent = formatDay(picture.captured_at);
@@ -127,6 +130,15 @@ function paint() {
   dateStart.textContent = formatDay(pictures[0].captured_at);
   dateEnd.textContent = formatDay(pictures[pictures.length - 1].captured_at);
   requestAnimationFrame(alignStrip);
+}
+
+function rainbowLayer(className) {
+  const layer = document.createElement("div");
+  layer.className = className;
+  const spin = document.createElement("div");
+  spin.className = "rainbow-spin";
+  layer.append(spin);
+  return layer;
 }
 
 function alignStrip() {

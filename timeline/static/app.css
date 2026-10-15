@@ -357,10 +357,57 @@ h1 {
   white-space: nowrap;
 }
 
+#scrub-wrap {
+  min-width: 0;
+}
+
 #scrub {
   width: 100%;
   accent-color: #40ffaa;
   cursor: pointer;
+}
+
+#beam {
+  position: relative;
+  height: 8px;
+  margin-top: 0.45rem;
+  border-radius: 999px;
+  overflow: hidden;
+  background: linear-gradient(
+    90deg,
+    #ff4b4b,
+    #ff9a2e,
+    #ffe14a,
+    #5dff7a,
+    #3ee0ff,
+    #5b7cff,
+    #c86bff,
+    #ff4d9a
+  );
+  opacity: 0.28;
+}
+
+#beam::after {
+  content: "";
+  position: absolute;
+  top: -14px;
+  bottom: -14px;
+  width: 14%;
+  border-radius: 999px;
+  background: radial-gradient(circle, rgba(255, 255, 255, 1), rgba(255, 255, 255, 0.55) 42%, transparent 70%);
+  box-shadow: 0 0 18px 6px rgba(255, 255, 255, 0.72);
+  mix-blend-mode: screen;
+  pointer-events: none;
+  animation: beam-travel 3.4s ease-in-out infinite alternate;
+}
+
+@keyframes beam-travel {
+  from { left: -3%; opacity: 0.12; }
+  to { left: 89%; opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #beam::after { animation: none; left: 44%; opacity: 0.55; }
 }
 
 #hint {

@@ -84,6 +84,7 @@ h1 {
 
 #library-open,
 .library-actions button,
+#library-rescan,
 .folder-choice,
 #step-back,
 #step-forward {
@@ -162,12 +163,16 @@ h1 {
   text-align: left;
 }
 
-.library-actions {
+.library-actions,
+#library-scan {
   display: flex;
   justify-content: center;
+  align-items: center;
   flex-wrap: wrap;
   gap: 0.5rem;
 }
+
+#library-rescan[hidden] { display: none; }
 
 #stage {
   flex: 1;
@@ -222,6 +227,12 @@ h1 {
   opacity: calc(1 - var(--distance) * 0.1);
 }
 
+.shot {
+  position: relative;
+  display: block;
+  line-height: 0;
+}
+
 .frame img {
   width: calc(46vh / (1 + var(--distance) * 1.15));
   height: calc(46vh / (1 + var(--distance) * 1.15));
@@ -233,8 +244,73 @@ h1 {
   box-shadow: 0 16px 40px rgba(0, 0, 0, 0.38);
 }
 
+.rainbow-glow,
+.rainbow-ring {
+  position: absolute;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.rainbow-glow {
+  inset: -14px;
+  border-radius: 26px;
+  animation: rainbow-breathe-glow 2.8s ease-in-out infinite;
+}
+
+.rainbow-ring {
+  inset: -6px;
+  border-radius: 18px;
+  animation: rainbow-breathe 2.8s ease-in-out infinite;
+}
+
+.rainbow-spin {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 220%;
+  height: 220%;
+  background: conic-gradient(
+    #ff4b4b,
+    #ff9a2e,
+    #ffe14a,
+    #5dff7a,
+    #3ee0ff,
+    #5b7cff,
+    #c86bff,
+    #ff4d9a,
+    #ff4b4b
+  );
+  animation: rainbow-spin 24s linear infinite;
+}
+
 .frame[aria-current="true"] img {
-  border-color: #40ffaa;
+  position: relative;
+  z-index: 1;
+  border-color: #0e0d14;
+}
+
+@keyframes rainbow-spin {
+  from { transform: translate(-50%, -50%) rotate(0deg); }
+  to { transform: translate(-50%, -50%) rotate(-360deg); }
+}
+
+@keyframes rainbow-breathe {
+  0%, 100% { opacity: 0.72; filter: brightness(0.82); }
+  50% { opacity: 1; filter: brightness(1.18); }
+}
+
+@keyframes rainbow-breathe-glow {
+  0%, 100% { opacity: 0.45; filter: blur(12px) brightness(0.82); }
+  50% { opacity: 0.9; filter: blur(12px) brightness(1.22); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rainbow-glow,
+  .rainbow-ring,
+  .rainbow-spin {
+    animation: none;
+  }
 }
 
 .frame span {
@@ -281,10 +357,116 @@ h1 {
   white-space: nowrap;
 }
 
+#scrub-wrap {
+  position: relative;
+  min-width: 0;
+  height: 40px;
+}
+
 #scrub {
+  position: relative;
+  z-index: 2;
   width: 100%;
-  accent-color: #40ffaa;
+  height: 18px;
+  margin: 0;
+  background: transparent;
   cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  opacity: 1;
+}
+
+#scrub-face {
+  position: absolute;
+  z-index: 1;
+  left: 0;
+  right: 0;
+  top: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: #d6d3d1;
+  pointer-events: none;
+}
+
+#scrub::-webkit-slider-runnable-track {
+  height: 6px;
+  background: transparent;
+  border: 0;
+  border-radius: 999px;
+}
+
+#scrub::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  margin-top: -6px;
+  border: 0;
+  border-radius: 50%;
+  background: #fafaf9;
+}
+
+#scrub::-moz-range-track {
+  height: 6px;
+  background: transparent;
+  border: 0;
+  border-radius: 999px;
+}
+
+#scrub::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border: 0;
+  border-radius: 50%;
+  background: #fafaf9;
+}
+
+#beam {
+  position: absolute;
+  z-index: 0;
+  left: 0;
+  right: 0;
+  top: -3px;
+  height: 24px;
+  margin: 0;
+  pointer-events: none;
+  border-radius: 999px;
+  overflow: hidden;
+  background: linear-gradient(
+    90deg,
+    #ff4b4b,
+    #ff9a2e,
+    #ffe14a,
+    #5dff7a,
+    #3ee0ff,
+    #5b7cff,
+    #c86bff,
+    #ff4d9a
+  );
+  opacity: 0.5;
+}
+
+#beam::after {
+  content: "";
+  position: absolute;
+  top: -14px;
+  bottom: -14px;
+  width: 14%;
+  border-radius: 999px;
+  background: radial-gradient(circle, rgba(255, 255, 255, 1), rgba(255, 255, 255, 0.55) 42%, transparent 70%);
+  box-shadow: 0 0 18px 6px rgba(255, 255, 255, 0.72);
+  mix-blend-mode: screen;
+  pointer-events: none;
+  animation: beam-travel 3.4s ease-in-out infinite alternate;
+}
+
+@keyframes beam-travel {
+  from { left: -3%; opacity: 0.12; }
+  to { left: 89%; opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #beam::after { animation: none; left: 44%; opacity: 0.55; }
 }
 
 #hint {

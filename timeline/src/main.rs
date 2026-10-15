@@ -1,6 +1,7 @@
 mod files;
 mod library;
 mod scan;
+mod store;
 
 use std::env;
 use std::io::{Read, Write};
@@ -11,11 +12,12 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use chrono::SecondsFormat;
+use chrono::{DateTime, SecondsFormat, Utc};
 
 use crate::files::read_picture;
 use crate::library::{display_label, list_folders, resolve_folder, FolderView};
 use crate::scan::{scan_folder, Picture};
+use crate::store::{fresh_pictures, Catalog, FolderScan, Session};
 
 const INDEX_HTML: &str = include_str!("../static/index.html");
 const APP_CSS: &str = include_str!("../static/app.css");
@@ -29,16 +31,20 @@ struct AppState {
 struct Inner {
     library_root: PathBuf,
     host_label: String,
+    catalog: Option<Catalog>,
     library: Mutex<Library>,
 }
 
 struct Library {
     label: Option<String>,
+    scanned_at: Option<DateTime<Utc>>,
     pictures: Vec<Picture>,
 }
 
 struct ScannedFolder {
     label: String,
+    scanned_at: DateTime<Utc>,
+    reused: bool,
     pictures: Vec<Picture>,
 }
 
@@ -60,14 +66,23 @@ fn main() -> ExitCode {
     let library_root = PathBuf::from(env::var("LIBRARY_ROOT").unwrap_or_else(|_| "/host".to_string()));
     let host_label = env::var("HOST_ROOT_LABEL").unwrap_or_default();
     let port = env::var("PORT").unwrap_or_else(|_| "8080".to_string());
+    let catalog = env::var("DATABASE_URL").ok().and_then(|url| match Catalog::parse(&url) {
+        Some(catalog) => {
+            eprintln!("picture catalog at {}", catalog.label());
+            Some(catalog)
+        }
+        None => {
+            eprintln!("DATABASE_URL is not a postgres address");
+            None
+        }
+    });
+    let library = recall_library(catalog.as_ref(), &library_root, &host_label);
     let state = AppState {
         inner: Arc::new(Inner {
             library_root,
             host_label,
-            library: Mutex::new(Library {
-                label: None,
-                pictures: Vec::new(),
-            }),
+            catalog,
+            library: Mutex::new(library),
         }),
     };
     let address = format!("0.0.0.0:{port}");
@@ -145,30 +160,50 @@ fn library_status(state: &AppState) -> Outgoing {
         Ok(library) => library,
         Err(_) => return text(500, "The folder query stopped."),
     };
-    let body = match &library.label {
-        Some(label) => format!("{{\"label\":{}}}", json_string(label)),
-        None => "{\"label\":null}".to_string(),
+    let label = match &library.label {
+        Some(label) => json_string(label),
+        None => "null".to_string(),
     };
-    json(200, body)
+    let scanned_at = match library.scanned_at {
+        Some(scanned_at) => json_string(&scanned_at.to_rfc3339_opts(SecondsFormat::Secs, true)),
+        None => "null".to_string(),
+    };
+    json(200, format!("{{\"label\":{label},\"scanned_at\":{scanned_at}}}"))
 }
 
 fn library_folders(state: &AppState, query: &str) -> Outgoing {
     let requested = query_value(query, "path");
-    match list_folders(&state.inner.library_root, &state.inner.host_label, &requested) {
-        Ok(view) => json(200, folder_json(&view)),
-        Err(message) => text(400, &message),
-    }
+    let view = match list_folders(&state.inner.library_root, &state.inner.host_label, &requested) {
+        Ok(view) => view,
+        Err(message) => return text(400, &message),
+    };
+    let scanned_at = resolve_folder(&state.inner.library_root, &state.inner.host_label, &requested)
+        .ok()
+        .and_then(|folder| stored_scan_time(state.inner.catalog.as_ref(), &folder));
+    json(200, folder_json(&view, scanned_at.as_ref()))
 }
 
 fn choose_library(state: &AppState, body: &[u8]) -> Outgoing {
     if body.len() > 8192 {
         return text(400, "The folder request is too large.");
     }
-    let Some(requested) = json_path(&String::from_utf8_lossy(body)) else {
+    let payload = String::from_utf8_lossy(body);
+    let Some(requested) = json_path(&payload) else {
         return text(400, "Choose a folder.");
     };
-    eprintln!("show folder {requested}");
-    let scanned = match scan_chosen(&state.inner.library_root, &state.inner.host_label, &requested) {
+    let rescan = json_flag(&payload, "rescan");
+    if rescan {
+        eprintln!("scan folder {requested}");
+    } else {
+        eprintln!("show folder {requested}");
+    }
+    let scanned = match scan_chosen(
+        &state.inner.library_root,
+        &state.inner.host_label,
+        &requested,
+        state.inner.catalog.as_ref(),
+        rescan,
+    ) {
         Ok(scanned) => scanned,
         Err(message) => return text(400, &message),
     };
@@ -178,11 +213,18 @@ fn choose_library(state: &AppState, body: &[u8]) -> Outgoing {
     };
     let files = scanned.pictures.len();
     let label = scanned.label;
+    let scanned_at = scanned.scanned_at.to_rfc3339_opts(SecondsFormat::Secs, true);
     library.label = Some(label.clone());
+    library.scanned_at = Some(scanned.scanned_at);
     library.pictures = scanned.pictures;
     json(
         200,
-        format!("{{\"label\":{},\"files\":{files}}}", json_string(&label)),
+        format!(
+            "{{\"label\":{},\"files\":{files},\"scanned_at\":{},\"reused\":{}}}",
+            json_string(&label),
+            json_string(&scanned_at),
+            if scanned.reused { "true" } else { "false" }
+        ),
     )
 }
 
@@ -198,10 +240,13 @@ fn picture_list(state: &AppState) -> Outgoing {
         }
         let captured_at = picture.captured_at.to_rfc3339_opts(SecondsFormat::Secs, true);
         body.push_str(&format!(
-            "{{\"id\":{},\"captured_at\":{},\"name\":{}}}",
+            "{{\"id\":{},\"captured_at\":{},\"name\":{},\"latitude\":{},\"longitude\":{},\"place\":{}}}",
             picture.id,
             json_string(&captured_at),
-            json_string(&picture.name)
+            json_string(&picture.name),
+            json_number(picture.latitude),
+            json_number(picture.longitude),
+            json_optional(picture.place.as_deref())
         ));
     }
     body.push(']');
@@ -234,18 +279,224 @@ fn picture_file(state: &AppState, id: i64) -> Outgoing {
     }
 }
 
-fn scan_chosen(library_root: &Path, host_label: &str, requested: &str) -> Result<ScannedFolder, String> {
+fn scan_chosen(
+    library_root: &Path,
+    host_label: &str,
+    requested: &str,
+    catalog: Option<&Catalog>,
+    rescan: bool,
+) -> Result<ScannedFolder, String> {
     let folder = resolve_folder(library_root, host_label, requested)?;
     let root = library_root
         .canonicalize()
         .unwrap_or_else(|_| library_root.to_path_buf());
+    let folder_key = folder.to_string_lossy().into_owned();
+    let label = display_label(&root, host_label, &folder);
+    let mut session = catalog.and_then(open_catalog);
+    if !rescan {
+        if let Some(session) = session.as_mut() {
+            if let Some(stored) = remembered_folder(session, &folder_key) {
+            eprintln!(
+                "opened stored folder {folder_key} with {} pictures",
+                stored.pictures.len()
+            );
+            return Ok(ScannedFolder {
+                label,
+                scanned_at: stored.scan.scanned_at,
+                reused: true,
+                pictures: stored.pictures,
+            });
+            }
+        }
+    }
+    let known = match session.as_mut() {
+        Some(session) => match session.load_folder(&folder_key) {
+            Ok(stored) => stored,
+            Err(err) => {
+                eprintln!("picture catalog read stopped: {err}");
+                std::collections::HashMap::new()
+            }
+        },
+        None => std::collections::HashMap::new(),
+    };
+    let pictures = scan_folder(&folder, &known);
+    let scanned_at = Utc::now();
+    if let Some(session) = session.as_mut() {
+        let fresh = fresh_pictures(&pictures, &known);
+        let stored = if rescan {
+            if let Err(err) = session.clear_pictures(&folder_key) {
+                eprintln!("picture catalog clear stopped: {err}");
+                false
+            } else if let Err(err) = session.save_pictures(&folder_key, &pictures.iter().collect::<Vec<_>>()) {
+                eprintln!("picture catalog save stopped: {err}");
+                false
+            } else {
+                eprintln!("picture catalog stored the new scan for {folder_key}");
+                true
+            }
+        } else if fresh.is_empty() {
+            eprintln!("picture catalog already holds every name in {folder_key}");
+            true
+        } else if let Err(err) = session.save_pictures(&folder_key, &fresh) {
+            eprintln!("picture catalog save stopped: {err}");
+            false
+        } else {
+            eprintln!("picture catalog stored {} new names in {folder_key}", fresh.len());
+            true
+        };
+        if !stored {
+            eprintln!("picture catalog kept the previous folder scan for {folder_key}");
+        } else if let Err(err) = session.save_scan(&folder_key, scanned_at, pictures.len() as i64) {
+            eprintln!("picture catalog folder save stopped: {err}");
+        } else {
+            eprintln!("picture catalog stored the folder scan for {folder_key}");
+        }
+    }
     Ok(ScannedFolder {
-        label: display_label(&root, host_label, &folder),
-        pictures: scan_folder(&folder),
+        label,
+        scanned_at,
+        reused: false,
+        pictures,
     })
 }
 
-fn folder_json(view: &FolderView) -> String {
+fn recall_library(catalog: Option<&Catalog>, library_root: &Path, host_label: &str) -> Library {
+    let Some(catalog) = catalog else {
+        return empty_library();
+    };
+    let Some(mut session) = open_catalog(catalog) else {
+        return empty_library();
+    };
+    let stored = match remembered_latest(&mut session) {
+        Ok(stored) => stored,
+        Err(err) => {
+            eprintln!("picture catalog folder read stopped: {err}");
+            return empty_library();
+        }
+    };
+    let Some(stored) = stored else {
+        eprintln!("picture catalog has no stored folder");
+        return empty_library();
+    };
+    let root = library_root
+        .canonicalize()
+        .unwrap_or_else(|_| library_root.to_path_buf());
+    let label = display_label(&root, host_label, Path::new(&stored.scan.folder));
+    eprintln!(
+        "opened stored folder {} with {} pictures",
+        stored.scan.folder,
+        stored.pictures.len()
+    );
+    Library {
+        label: Some(label),
+        scanned_at: Some(stored.scan.scanned_at),
+        pictures: stored.pictures,
+    }
+}
+
+struct StoredFolder {
+    scan: FolderScan,
+    pictures: Vec<Picture>,
+}
+
+fn remembered_latest(session: &mut Session) -> Result<Option<StoredFolder>, String> {
+    if let Some(scan) = session.load_latest_scan()? {
+        let pictures = session.load_pictures(&scan.folder)?;
+        return Ok(Some(StoredFolder { scan, pictures }));
+    }
+    let Some(folder) = session.latest_stored_folder()? else {
+        return Ok(None);
+    };
+    remembered_pictures(session, &folder)
+}
+
+fn remembered_folder(session: &mut Session, folder: &str) -> Option<StoredFolder> {
+    match session.load_scan(folder) {
+        Ok(Some(_)) => match remembered_pictures(session, folder) {
+            Ok(stored) => stored,
+            Err(err) => {
+                eprintln!("picture catalog picture read stopped: {err}");
+                None
+            }
+        },
+        Ok(None) => match session.load_folder(folder) {
+            Ok(known) if !known.is_empty() => match remembered_pictures(session, folder) {
+                Ok(stored) => stored,
+                Err(err) => {
+                    eprintln!("picture catalog picture read stopped: {err}");
+                    None
+                }
+            },
+            Ok(_) => None,
+            Err(err) => {
+                eprintln!("picture catalog read stopped: {err}");
+                None
+            }
+        },
+        Err(err) => {
+            eprintln!("picture catalog folder read stopped: {err}");
+            None
+        }
+    }
+}
+
+fn remembered_pictures(session: &mut Session, folder: &str) -> Result<Option<StoredFolder>, String> {
+    let pictures = session.load_pictures(folder)?;
+    let scanned_at = match session.load_scan(folder)? {
+        Some(scan) => scan.scanned_at,
+        None => {
+            let scanned_at = session.latest_stored_time(folder)?.unwrap_or_else(Utc::now);
+            session.save_scan(folder, scanned_at, pictures.len() as i64)?;
+            scanned_at
+        }
+    };
+    Ok(Some(StoredFolder {
+        scan: FolderScan {
+            folder: folder.to_string(),
+            scanned_at,
+            picture_count: pictures.len() as i64,
+        },
+        pictures,
+    }))
+}
+
+fn stored_scan_time(catalog: Option<&Catalog>, folder: &Path) -> Option<DateTime<Utc>> {
+    let folder_key = folder.to_string_lossy();
+    let mut session = open_catalog(catalog?)?;
+    match session.load_scan(&folder_key) {
+        Ok(scan) => scan.map(|scan| scan.scanned_at),
+        Err(err) => {
+            eprintln!("picture catalog folder read stopped: {err}");
+            None
+        }
+    }
+}
+
+fn open_catalog(catalog: &Catalog) -> Option<Session> {
+    match catalog.open() {
+        Ok(mut session) => match session.prepare() {
+            Ok(()) => Some(session),
+            Err(err) => {
+                eprintln!("picture catalog prepare stopped: {err}");
+                None
+            }
+        },
+        Err(err) => {
+            eprintln!("picture catalog connection stopped: {err}");
+            None
+        }
+    }
+}
+
+fn empty_library() -> Library {
+    Library {
+        label: None,
+        scanned_at: None,
+        pictures: Vec::new(),
+    }
+}
+
+fn folder_json(view: &FolderView, scanned_at: Option<&DateTime<Utc>>) -> String {
     let parent = match &view.parent {
         Some(parent) => json_string(parent),
         None => "null".to_string(),
@@ -262,8 +513,12 @@ fn folder_json(view: &FolderView) -> String {
         ));
     }
     entries.push(']');
+    let scanned_at = match scanned_at {
+        Some(scanned_at) => json_string(&scanned_at.to_rfc3339_opts(SecondsFormat::Secs, true)),
+        None => "null".to_string(),
+    };
     format!(
-        "{{\"label\":{},\"parent\":{parent},\"entries\":{entries}}}",
+        "{{\"label\":{},\"parent\":{parent},\"entries\":{entries},\"scanned_at\":{scanned_at}}}",
         json_string(&view.label)
     )
 }
@@ -386,6 +641,18 @@ fn url_decode(value: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+fn json_flag(body: &str, key: &str) -> bool {
+    let needle = format!("\"{key}\"");
+    let Some(index) = body.find(&needle) else {
+        return false;
+    };
+    let rest = body[index + needle.len()..].trim_start();
+    let Some(rest) = rest.strip_prefix(':') else {
+        return false;
+    };
+    rest.trim_start().starts_with("true")
+}
+
 fn json_path(body: &str) -> Option<String> {
     let key = "\"path\"";
     let index = body.find(key)?;
@@ -417,6 +684,20 @@ fn json_path(body: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn json_number(value: Option<f64>) -> String {
+    match value {
+        Some(value) if value.is_finite() => format!("{value:.6}"),
+        _ => "null".to_string(),
+    }
+}
+
+fn json_optional(value: Option<&str>) -> String {
+    match value {
+        Some(value) => json_string(value),
+        None => "null".to_string(),
+    }
 }
 
 fn json_string(value: &str) -> String {

@@ -11,6 +11,7 @@ const REACH = 5;
 
 let pictures = [];
 let index = 0;
+let scannedAt = null;
 let wheelBudget = 0;
 let drag = null;
 
@@ -89,6 +90,9 @@ function paint() {
   scrub.disabled = pictures.length === 0;
   if (pictures.length === 0) {
     empty.hidden = false;
+    empty.textContent = scannedAt
+      ? "This folder has no pictures."
+      : "Choose a folder to lay its pictures out on the timeline.";
     dateLabel.textContent = "";
     dateStart.textContent = "";
     dateEnd.textContent = "";
@@ -112,9 +116,15 @@ function paint() {
     image.alt = "";
     image.addEventListener("load", alignStrip);
     image.src = `/api/pictures/${picture.id}/file`;
+    const shot = document.createElement("div");
+    shot.className = "shot";
+    if (position === index) {
+      shot.append(rainbowLayer("rainbow-glow"), rainbowLayer("rainbow-ring"));
+    }
+    shot.append(image);
     const caption = document.createElement("span");
     caption.textContent = formatDay(picture.captured_at);
-    button.append(image, caption);
+    button.append(shot, caption);
     button.addEventListener("click", () => select(position));
     strip.append(button);
   }
@@ -124,6 +134,15 @@ function paint() {
   dateStart.textContent = formatDay(pictures[0].captured_at);
   dateEnd.textContent = formatDay(pictures[pictures.length - 1].captured_at);
   requestAnimationFrame(alignStrip);
+}
+
+function rainbowLayer(className) {
+  const layer = document.createElement("div");
+  layer.className = className;
+  const spin = document.createElement("div");
+  spin.className = "rainbow-spin";
+  layer.append(spin);
+  return layer;
 }
 
 function alignStrip() {
@@ -166,6 +185,7 @@ function bindLibrary() {
   const closeButton = document.querySelector("#library-close");
   const upButton = document.querySelector("#library-up");
   const useButton = document.querySelector("#library-use");
+  const rescanButton = document.querySelector("#library-rescan");
   const pathLabel = document.querySelector("#library-path");
   const list = document.querySelector("#library-list");
   const status = document.querySelector("#library-status");
@@ -181,7 +201,8 @@ function bindLibrary() {
   upButton.addEventListener("click", () => {
     if (parentLabel != null) showFolders(parentLabel);
   });
-  useButton.addEventListener("click", () => showFolder(currentLabel));
+  useButton.addEventListener("click", () => showFolder(currentLabel, false));
+  rescanButton.addEventListener("click", () => showFolder(currentLabel, true));
   dialog.addEventListener("click", (event) => {
     if (event.target === dialog) dialog.hidden = true;
   });
@@ -192,6 +213,7 @@ function bindLibrary() {
     const response = await fetch("/api/library");
     if (!response.ok) return;
     const body = await response.json();
+    scannedAt = body.scanned_at || null;
     if (body.label) {
       currentLabel = body.label;
       openButton.textContent = folderName(body.label);
@@ -218,6 +240,8 @@ function bindLibrary() {
     parentLabel = view.parent;
     pathLabel.textContent = view.label;
     upButton.disabled = view.parent == null;
+    rescanButton.hidden = !view.scanned_at;
+    if (view.scanned_at) status.textContent = `Scanned ${formatScan(view.scanned_at)}`;
     list.replaceChildren();
     if (view.entries.length === 0) {
       const note = document.createElement("p");
@@ -236,26 +260,29 @@ function bindLibrary() {
     }
   }
 
-  async function showFolder(label) {
+  async function showFolder(label, rescan) {
     if (busy) return;
     busy = true;
     useButton.disabled = true;
-    status.textContent = "Scanning folder";
+    rescanButton.disabled = true;
+    status.textContent = rescan ? "Scanning folder" : "Opening folder";
     const response = await fetch("/api/library", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path: label }),
+      body: JSON.stringify({ path: label, rescan }),
     });
     busy = false;
     useButton.disabled = false;
+    rescanButton.disabled = false;
     if (!response.ok) {
       status.textContent = await response.text();
       return;
     }
     const body = await response.json();
     currentLabel = body.label;
+    scannedAt = body.scanned_at || null;
     openButton.textContent = folderName(body.label);
-    status.textContent = body.files === 1 ? "1 picture" : `${body.files} pictures`;
+    status.textContent = pictureSummary(body.files);
     summary.textContent = status.textContent;
     dialog.hidden = true;
     await loadPictures();
@@ -271,8 +298,26 @@ async function loadPictures() {
   }
   pictures = await response.json();
   index = 0;
-  summary.textContent = pictures.length === 1 ? "1 picture" : `${pictures.length} pictures`;
+  summary.textContent = pictureSummary(pictures.length);
   paint();
+}
+
+function pictureSummary(count) {
+  const text = count === 1 ? "1 picture" : `${count} pictures`;
+  if (!scannedAt) return text;
+  return `${text}, scanned ${formatScan(scannedAt)}`;
+}
+
+function formatScan(value) {
+  const when = new Date(value);
+  if (Number.isNaN(when.getTime())) return value;
+  return when.toLocaleString("en-GB", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 function folderName(label) {

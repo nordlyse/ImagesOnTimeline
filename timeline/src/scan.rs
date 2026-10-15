@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -5,12 +6,24 @@ use std::time::SystemTime;
 
 use chrono::{DateTime, NaiveDateTime, Utc};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Picture {
     pub id: i64,
     pub path: PathBuf,
     pub captured_at: DateTime<Utc>,
     pub name: String,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    pub place: Option<String>,
+}
+
+/// A picture already stored for this path. The file is not opened again.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredPicture {
+    pub captured_at: DateTime<Utc>,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    pub place: Option<String>,
 }
 
 pub fn is_image(path: &Path) -> bool {
@@ -20,10 +33,11 @@ pub fn is_image(path: &Path) -> bool {
     )
 }
 
-pub fn scan_folder(folder: &Path) -> Vec<Picture> {
+pub fn scan_folder(folder: &Path, known: &HashMap<String, StoredPicture>) -> Vec<Picture> {
     eprintln!("scanning {}", folder.display());
     let mut pictures = Vec::new();
     let mut folders = 0usize;
+    let mut reused = 0usize;
     let mut pending = vec![folder.to_path_buf()];
     while let Some(dir) = pending.pop() {
         folders += 1;
@@ -57,19 +71,47 @@ pub fn scan_folder(folder: &Path) -> Vec<Picture> {
                 continue;
             }
             let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-            let captured_at = metadata_time(&path).unwrap_or_else(|| DateTime::<Utc>::from(modified));
+            let stored = path.to_str().and_then(|key| known.get(key));
+            let (captured_at, latitude, longitude, place) = if let Some(stored) = stored {
+                reused += 1;
+                (
+                    stored.captured_at,
+                    stored.latitude,
+                    stored.longitude,
+                    stored.place.clone(),
+                )
+            } else {
+                let meta = picture_meta(&path);
+                (
+                    meta.captured_at.unwrap_or_else(|| DateTime::<Utc>::from(modified)),
+                    meta.latitude,
+                    meta.longitude,
+                    meta.place,
+                )
+            };
             pictures.push(Picture {
                 id: 0,
                 path,
                 captured_at,
                 name,
+                latitude,
+                longitude,
+                place,
             });
             if pictures.len() % 200 == 0 {
                 eprintln!("scanned {folders} folders, {} pictures", pictures.len());
             }
         }
     }
-    eprintln!("scanned {folders} folders, {} pictures", pictures.len());
+    eprintln!(
+        "scanned {folders} folders, {} pictures, {reused} already stored",
+        pictures.len()
+    );
+    arrange_pictures(&mut pictures);
+    pictures
+}
+
+pub fn arrange_pictures(pictures: &mut Vec<Picture>) {
     pictures.sort_by(|left, right| {
         left.captured_at
             .cmp(&right.captured_at)
@@ -79,7 +121,6 @@ pub fn scan_folder(folder: &Path) -> Vec<Picture> {
     for (offset, picture) in pictures.iter_mut().enumerate() {
         picture.id = i64::try_from(offset).unwrap_or(i64::MAX) + 1;
     }
-    pictures
 }
 
 fn skip_directory(name: &str) -> bool {
@@ -101,38 +142,119 @@ fn skip_directory(name: &str) -> bool {
     )
 }
 
-fn metadata_time(path: &Path) -> Option<DateTime<Utc>> {
+#[derive(Debug, Clone, Default)]
+struct PictureMeta {
+    captured_at: Option<DateTime<Utc>>,
+    latitude: Option<f64>,
+    longitude: Option<f64>,
+    place: Option<String>,
+}
+
+fn picture_meta(path: &Path) -> PictureMeta {
     match extension(path).as_str() {
-        "jpg" | "jpeg" => jpeg_date(&read_prefix(path, 262_144)?),
-        "png" | "tif" | "tiff" => tiff_or_png_date(&read_prefix(path, 262_144)?),
-        "heic" | "heif" | "avif" => bounded_exif_date(path),
-        _ => None,
+        "jpg" | "jpeg" => meta_from_bytes(&read_prefix(path, 262_144).unwrap_or_default(), true),
+        "png" | "tif" | "tiff" => meta_from_bytes(&read_prefix(path, 262_144).unwrap_or_default(), false),
+        "heic" | "heif" | "avif" => bounded_meta(path),
+        _ => PictureMeta::default(),
     }
 }
 
-/// Phone photos keep the capture time near either end of the file. Reading the
+fn meta_from_bytes(bytes: &[u8], jpeg: bool) -> PictureMeta {
+    let tiff = if jpeg {
+        jpeg_exif(bytes).map(read_tiff).unwrap_or_default()
+    } else if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        png_exif(bytes).map(read_tiff).unwrap_or_default()
+    } else {
+        read_tiff(bytes)
+    };
+    PictureMeta {
+        captured_at: tiff.captured_at,
+        latitude: tiff.latitude,
+        longitude: tiff.longitude,
+        place: tiff.place.or_else(|| xmp_place(bytes)),
+    }
+}
+
+/// Phone photos keep the capture record near either end of the file. Reading the
 /// whole file stalls a large folder, so only those edges are checked.
-fn bounded_exif_date(path: &Path) -> Option<DateTime<Utc>> {
+fn bounded_meta(path: &Path) -> PictureMeta {
     const WINDOW: u64 = 512 * 1024;
-    let mut file = File::open(path).ok()?;
-    let length = file.metadata().ok()?.len();
+    let Ok(mut file) = File::open(path) else {
+        return PictureMeta::default();
+    };
+    let Ok(length) = file.metadata().map(|metadata| metadata.len()) else {
+        return PictureMeta::default();
+    };
     if length == 0 {
-        return None;
+        return PictureMeta::default();
     }
-    let head_len = usize::try_from(length.min(WINDOW)).ok()?;
+    let head_len = usize::try_from(length.min(WINDOW)).unwrap_or(0);
     let mut head = vec![0; head_len];
-    file.read_exact(&mut head).ok()?;
-    if let Some(when) = find_exif_date(&head) {
-        return Some(when);
+    if file.read_exact(&mut head).is_err() {
+        return PictureMeta::default();
     }
+    let head_meta = window_meta(&head);
     if length <= WINDOW {
-        return None;
+        return head_meta;
     }
-    let tail_len = usize::try_from(WINDOW.min(length - WINDOW)).ok()?;
-    file.seek(SeekFrom::End(-(tail_len as i64))).ok()?;
+    let tail_len = usize::try_from(WINDOW.min(length.saturating_sub(WINDOW))).unwrap_or(0);
+    if file.seek(SeekFrom::End(-(tail_len as i64))).is_err() {
+        return head_meta;
+    }
     let mut tail = vec![0; tail_len];
-    file.read_exact(&mut tail).ok()?;
-    find_exif_date(&tail)
+    if file.read_exact(&mut tail).is_err() {
+        return head_meta;
+    }
+    merge_meta(head_meta, window_meta(&tail))
+}
+
+fn window_meta(bytes: &[u8]) -> PictureMeta {
+    let mut meta = if let Some(tiff) = embedded_exif(bytes) {
+        let fields = read_tiff(tiff);
+        PictureMeta {
+            captured_at: fields.captured_at.or_else(|| find_exif_date(bytes)),
+            latitude: fields.latitude,
+            longitude: fields.longitude,
+            place: fields.place.or_else(|| xmp_place(bytes)),
+        }
+    } else {
+        PictureMeta {
+            captured_at: find_exif_date(bytes),
+            place: xmp_place(bytes),
+            ..PictureMeta::default()
+        }
+    };
+    if meta.place.is_none() {
+        meta.place = xmp_place(bytes);
+    }
+    meta
+}
+
+fn merge_meta(first: PictureMeta, second: PictureMeta) -> PictureMeta {
+    let (latitude, longitude) = match (first.latitude, first.longitude) {
+        (Some(latitude), Some(longitude)) => (Some(latitude), Some(longitude)),
+        _ => (second.latitude, second.longitude),
+    };
+    PictureMeta {
+        captured_at: first.captured_at.or(second.captured_at),
+        latitude,
+        longitude,
+        place: first.place.or(second.place),
+    }
+}
+
+fn embedded_exif(bytes: &[u8]) -> Option<&[u8]> {
+    let mut index = 0;
+    while index + 14 <= bytes.len() {
+        if bytes[index..].starts_with(b"Exif\0\0") {
+            let tiff = &bytes[index + 6..];
+            if tiff.len() >= 8 && (tiff.starts_with(b"II*\0") || tiff.starts_with(b"MM\0*")) {
+                return Some(tiff);
+            }
+        }
+        index += 1;
+    }
+    None
 }
 
 fn find_exif_date(bytes: &[u8]) -> Option<DateTime<Utc>> {
@@ -163,14 +285,6 @@ fn is_exif_date(bytes: &[u8]) -> bool {
         && bytes[11..13].iter().chain(bytes[14..16].iter()).chain(bytes[17..19].iter()).all(u8::is_ascii_digit)
 }
 
-fn tiff_or_png_date(bytes: &[u8]) -> Option<DateTime<Utc>> {
-    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        png_date(bytes)
-    } else {
-        tiff_date(bytes)
-    }
-}
-
 fn read_prefix(path: &Path, limit: usize) -> Option<Vec<u8>> {
     let file = fs::File::open(path).ok()?;
     let mut reader = std::io::BufReader::new(file);
@@ -180,7 +294,7 @@ fn read_prefix(path: &Path, limit: usize) -> Option<Vec<u8>> {
     Some(buffer)
 }
 
-fn jpeg_date(bytes: &[u8]) -> Option<DateTime<Utc>> {
+fn jpeg_exif(bytes: &[u8]) -> Option<&[u8]> {
     if bytes.len() < 4 || bytes[0] != 0xFF || bytes[1] != 0xD8 {
         return None;
     }
@@ -213,8 +327,8 @@ fn jpeg_date(bytes: &[u8]) -> Option<DateTime<Utc>> {
         if marker == 0xE1 {
             let payload = &bytes[index + 2..index + length];
             if let Some(tiff) = payload.strip_prefix(b"Exif\0\0") {
-                if let Some(when) = tiff_date(tiff) {
-                    return Some(when);
+                if tiff.starts_with(b"II*\0") || tiff.starts_with(b"MM\0*") {
+                    return Some(tiff);
                 }
             }
         }
@@ -223,7 +337,7 @@ fn jpeg_date(bytes: &[u8]) -> Option<DateTime<Utc>> {
     None
 }
 
-fn png_date(bytes: &[u8]) -> Option<DateTime<Utc>> {
+fn png_exif(bytes: &[u8]) -> Option<&[u8]> {
     if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         return None;
     }
@@ -237,7 +351,7 @@ fn png_date(bytes: &[u8]) -> Option<DateTime<Utc>> {
             return None;
         }
         if kind == b"eXIf" {
-            return tiff_date(&bytes[start..end]);
+            return Some(&bytes[start..end]);
         }
         if kind == b"IEND" {
             return None;
@@ -247,42 +361,74 @@ fn png_date(bytes: &[u8]) -> Option<DateTime<Utc>> {
     None
 }
 
+#[derive(Debug, Clone, Default)]
+struct TiffFields {
+    captured_at: Option<DateTime<Utc>>,
+    latitude: Option<f64>,
+    longitude: Option<f64>,
+    place: Option<String>,
+}
+
+#[cfg(test)]
 fn tiff_date(bytes: &[u8]) -> Option<DateTime<Utc>> {
+    read_tiff(bytes).captured_at
+}
+
+fn read_tiff(bytes: &[u8]) -> TiffFields {
+    let mut fields = TiffFields::default();
     if bytes.len() < 8 {
-        return None;
+        return fields;
     }
     let little = match &bytes[..2] {
         b"II" => true,
         b"MM" => false,
-        _ => return None,
+        _ => return fields,
     };
-    if read_u16(bytes, 2, little)? != 42 {
-        return None;
+    if read_u16(bytes, 2, little) != Some(42) {
+        return fields;
     }
-    let mut offset = read_u32(bytes, 4, little)? as usize;
+    let Some(start) = read_u32(bytes, 4, little) else {
+        return fields;
+    };
+    let mut offset = start as usize;
     let mut original = None;
     let mut modified = None;
+    let mut gps_offset = None;
     let mut follow_exif = true;
     for _ in 0..6 {
-        if offset.checked_add(2)? > bytes.len() {
+        if offset.checked_add(2).map(|end| end > bytes.len()).unwrap_or(true) {
             break;
         }
-        let count = read_u16(bytes, offset, little)? as usize;
+        let Some(count) = read_u16(bytes, offset, little) else {
+            break;
+        };
         offset += 2;
         let mut exif_offset = None;
         for _ in 0..count {
-            if offset.checked_add(12)? > bytes.len() {
-                return original.or(modified);
+            if offset.checked_add(12).map(|end| end > bytes.len()).unwrap_or(true) {
+                fields.captured_at = original.or(modified);
+                return fields;
             }
-            let tag = read_u16(bytes, offset, little)?;
-            let kind = read_u16(bytes, offset + 2, little)?;
-            let count = read_u32(bytes, offset + 4, little)? as usize;
-            let field = bytes.get(offset + 8..offset + 12)?;
+            let Some(tag) = read_u16(bytes, offset, little) else {
+                break;
+            };
+            let Some(kind) = read_u16(bytes, offset + 2, little) else {
+                break;
+            };
+            let Some(count) = read_u32(bytes, offset + 4, little) else {
+                break;
+            };
+            let Some(field) = bytes.get(offset + 8..offset + 12) else {
+                break;
+            };
             if follow_exif && tag == 0x8769 && kind == 4 {
-                exif_offset = Some(read_u32(field, 0, little)? as usize);
+                exif_offset = read_u32(field, 0, little).map(|value| value as usize);
+            }
+            if follow_exif && tag == 0x8825 && kind == 4 {
+                gps_offset = read_u32(field, 0, little).map(|value| value as usize);
             }
             if kind == 2 && (tag == 0x9003 || tag == 0x0132) {
-                if let Some(text) = ascii_value(bytes, field, count, little) {
+                if let Some(text) = ascii_value(bytes, field, count as usize, little) {
                     let when = parse_exif_text(&text);
                     if tag == 0x9003 {
                         original = original.or(when);
@@ -293,21 +439,171 @@ fn tiff_date(bytes: &[u8]) -> Option<DateTime<Utc>> {
             }
             offset += 12;
         }
-        if original.is_some() {
-            return original;
-        }
-        if let Some(next) = exif_offset {
+        if let Some(next) = exif_offset.filter(|_| original.is_none()) {
             offset = next;
             follow_exif = false;
             continue;
         }
         break;
     }
-    original.or(modified)
+    fields.captured_at = original.or(modified);
+    if let Some(gps) = gps_offset {
+        apply_gps(&mut fields, bytes, gps, little);
+    }
+    fields
+}
+
+fn apply_gps(fields: &mut TiffFields, bytes: &[u8], offset: usize, little: bool) {
+    let Some(count) = read_u16(bytes, offset, little) else {
+        return;
+    };
+    let mut latitude = None;
+    let mut latitude_ref = None;
+    let mut longitude = None;
+    let mut longitude_ref = None;
+    let mut place = None;
+    let mut cursor = offset + 2;
+    for _ in 0..count {
+        if cursor + 12 > bytes.len() {
+            break;
+        }
+        let Some(tag) = read_u16(bytes, cursor, little) else {
+            break;
+        };
+        let Some(kind) = read_u16(bytes, cursor + 2, little) else {
+            break;
+        };
+        let Some(count) = read_u32(bytes, cursor + 4, little) else {
+            break;
+        };
+        let Some(field) = bytes.get(cursor + 8..cursor + 12) else {
+            break;
+        };
+        match tag {
+            1 => latitude_ref = ascii_value(bytes, field, count as usize, little),
+            2 => latitude = read_dms(bytes, field, count, kind, little),
+            3 => longitude_ref = ascii_value(bytes, field, count as usize, little),
+            4 => longitude = read_dms(bytes, field, count, kind, little),
+            0x1C => place = gps_text(bytes, field, count as usize, kind, little),
+            _ => {}
+        }
+        cursor += 12;
+    }
+    if let (Some(latitude), Some(longitude)) = (latitude, longitude) {
+        let latitude = signed_coordinate(latitude, latitude_ref.as_deref(), "S");
+        let longitude = signed_coordinate(longitude, longitude_ref.as_deref(), "W");
+        if latitude.abs() <= 90.0 && longitude.abs() <= 180.0 {
+            fields.latitude = Some(latitude);
+            fields.longitude = Some(longitude);
+        }
+    }
+    if fields.place.is_none() {
+        fields.place = place.and_then(|text| clean_place(&text));
+    }
+}
+
+fn signed_coordinate(value: f64, reference: Option<&str>, negative: &str) -> f64 {
+    if reference.is_some_and(|reference| reference.eq_ignore_ascii_case(negative)) {
+        -value.abs()
+    } else {
+        value.abs()
+    }
+}
+
+fn read_dms(bytes: &[u8], field: &[u8], count: u32, kind: u16, little: bool) -> Option<f64> {
+    if kind != 5 || count != 3 {
+        return None;
+    }
+    let start = read_u32(field, 0, little)? as usize;
+    let degrees = read_rational(bytes, start, little)?;
+    let minutes = read_rational(bytes, start + 8, little)?;
+    let seconds = read_rational(bytes, start + 16, little)?;
+    Some(degrees + minutes / 60.0 + seconds / 3600.0)
+}
+
+fn read_rational(bytes: &[u8], offset: usize, little: bool) -> Option<f64> {
+    let numerator = read_u32(bytes, offset, little)?;
+    let denominator = read_u32(bytes, offset + 4, little)?;
+    if denominator == 0 {
+        return None;
+    }
+    Some(f64::from(numerator) / f64::from(denominator))
+}
+
+fn gps_text(bytes: &[u8], field: &[u8], count: usize, kind: u16, little: bool) -> Option<String> {
+    if kind != 2 && kind != 7 {
+        return None;
+    }
+    let text = ascii_value(bytes, field, count, little)?;
+    let bytes = text.as_bytes();
+    let text = bytes
+        .strip_prefix(b"ASCII\0\0\0")
+        .map(|rest| String::from_utf8_lossy(rest).into_owned())
+        .unwrap_or(text);
+    Some(text)
+}
+
+fn xmp_place(bytes: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(bytes);
+    let keys = [
+        "Iptc4xmpCore:Location",
+        "photoshop:City",
+        "photoshop:State",
+        "photoshop:Country",
+    ];
+    let mut parts = Vec::new();
+    for key in keys {
+        let Some(value) = xmp_value(&text, key) else {
+            continue;
+        };
+        if parts.iter().any(|part: &String| part.eq_ignore_ascii_case(&value)) {
+            continue;
+        }
+        parts.push(value);
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        clean_place(&parts.join(", "))
+    }
+}
+
+fn xmp_value(text: &str, key: &str) -> Option<String> {
+    let element = format!("<{key}>");
+    if let Some(start) = text.find(&element) {
+        let rest = &text[start + element.len()..];
+        if let Some(end) = rest.find('<') {
+            return clean_place(&decode_xml(rest[..end].trim()));
+        }
+    }
+    let attribute = format!("{key}=\"");
+    let start = text.find(&attribute)? + attribute.len();
+    let rest = text.get(start..)?;
+    let end = rest.find('"')?;
+    clean_place(&decode_xml(rest[..end].trim()))
+}
+
+fn decode_xml(value: &str) -> String {
+    value
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+}
+
+fn clean_place(value: &str) -> Option<String> {
+    let text: String = value.chars().filter(|ch| !ch.is_control()).take(160).collect();
+    let text = text.trim();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.to_string())
+    }
 }
 
 fn ascii_value(bytes: &[u8], field: &[u8], count: usize, little: bool) -> Option<String> {
-    if count == 0 || count > 64 {
+    if count == 0 || count > 160 {
         return None;
     }
     let raw = if count <= 4 {
@@ -410,7 +706,7 @@ mod tests {
         filetime::set_file_mtime(root.join("later.png"), filetime::FileTime::from_unix_time(5_000, 0))
             .unwrap();
 
-        let pictures = scan_folder(&root);
+        let pictures = scan_folder(&root, &HashMap::new());
         let _ = fs::remove_dir_all(&root);
 
         assert_eq!(pictures.len(), 2);
@@ -418,5 +714,93 @@ mod tests {
         assert_eq!(pictures[1].name, "later.png");
         assert_eq!(pictures[0].id, 1);
         assert!(pictures[0].captured_at < pictures[1].captured_at);
+        assert!(pictures[0].latitude.is_none());
+        assert!(pictures[0].place.is_none());
+    }
+
+    #[test]
+    fn reuses_a_stored_file_name_instead_of_the_file_time() {
+        let root = std::env::temp_dir().join(format!("timeline-known-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("kept.png");
+        fs::write(&path, b"kept").unwrap();
+        filetime::set_file_mtime(&path, filetime::FileTime::from_unix_time(9_000, 0)).unwrap();
+        let stored_at = DateTime::<Utc>::from(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000));
+        let mut known = HashMap::new();
+        known.insert(
+            path.to_str().unwrap().to_string(),
+            StoredPicture {
+                captured_at: stored_at,
+                latitude: Some(41.0),
+                longitude: Some(29.0),
+                place: Some("Istanbul".to_string()),
+            },
+        );
+
+        let pictures = scan_folder(&root, &known);
+        let _ = fs::remove_dir_all(&root);
+
+        assert_eq!(pictures.len(), 1);
+        assert_eq!(pictures[0].name, "kept.png");
+        assert_eq!(pictures[0].captured_at, stored_at);
+        assert_eq!(pictures[0].latitude, Some(41.0));
+        assert_eq!(pictures[0].place.as_deref(), Some("Istanbul"));
+    }
+
+    #[test]
+    fn reads_coordinates_from_a_gps_directory() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"II");
+        bytes.extend_from_slice(&42u16.to_le_bytes());
+        bytes.extend_from_slice(&8u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&0x8825u16.to_le_bytes());
+        bytes.extend_from_slice(&4u16.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&26u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&4u16.to_le_bytes());
+        push_ascii_entry(&mut bytes, 1, b"N\0");
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&5u16.to_le_bytes());
+        bytes.extend_from_slice(&3u32.to_le_bytes());
+        bytes.extend_from_slice(&80u32.to_le_bytes());
+        push_ascii_entry(&mut bytes, 3, b"W\0");
+        bytes.extend_from_slice(&4u16.to_le_bytes());
+        bytes.extend_from_slice(&5u16.to_le_bytes());
+        bytes.extend_from_slice(&3u32.to_le_bytes());
+        bytes.extend_from_slice(&104u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        push_rational(&mut bytes, 41, 1);
+        push_rational(&mut bytes, 30, 1);
+        push_rational(&mut bytes, 0, 1);
+        push_rational(&mut bytes, 29, 1);
+        push_rational(&mut bytes, 0, 1);
+        push_rational(&mut bytes, 0, 1);
+
+        let fields = read_tiff(&bytes);
+        assert!((fields.latitude.unwrap() - 41.5).abs() < 0.0001);
+        assert!((fields.longitude.unwrap() + 29.0).abs() < 0.0001);
+    }
+
+    fn push_ascii_entry(bytes: &mut Vec<u8>, tag: u16, text: &[u8]) {
+        bytes.extend_from_slice(&tag.to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&(text.len() as u32).to_le_bytes());
+        let mut value = [0u8; 4];
+        value[..text.len()].copy_from_slice(text);
+        bytes.extend_from_slice(&value);
+    }
+
+    fn push_rational(bytes: &mut Vec<u8>, numerator: u32, denominator: u32) {
+        bytes.extend_from_slice(&numerator.to_le_bytes());
+        bytes.extend_from_slice(&denominator.to_le_bytes());
+    }
+
+    #[test]
+    fn reads_a_place_from_xmp() {
+        let bytes = br#"<photoshop:City>Istanbul</photoshop:City><photoshop:Country>Turkey</photoshop:Country>"#;
+        assert_eq!(xmp_place(bytes).as_deref(), Some("Istanbul, Turkey"));
     }
 }

@@ -22,7 +22,11 @@
         <div id="rail">
           <button type="button" id="step-back" aria-label="Previous picture">‹</button>
           <span id="date-start"></span>
-          <input id="scrub" type="range" min="0" max="0" value="0" aria-label="Timeline">
+          <div id="scrub-wrap">
+            <div id="beam" aria-hidden="true"></div>
+            <div id="scrub-face" aria-hidden="true"></div>
+            <input id="scrub" type="range" min="0" max="0" value="0" aria-label="Timeline">
+          </div>
           <span id="date-end"></span>
           <button type="button" id="step-forward" aria-label="Next picture">›</button>
         </div>
@@ -33,14 +37,17 @@
       <div id="library-card" role="dialog" aria-modal="true" aria-labelledby="library-title">
         <h2 id="library-title">Choose folder</h2>
         <p id="library-path"></p>
-        <p class="library-note">Pictures stay in this folder. Showing it lays this folder and its subfolders out on the timeline.</p>
+        <p class="library-note">Pictures stay in this folder. A folder shown before opens from its saved scan. A new folder is read once, and the scan time is kept.</p>
         <div id="library-list"></div>
         <div class="library-actions">
           <button type="button" id="library-up">Up</button>
           <button type="button" id="library-use">Show this folder</button>
           <button type="button" id="library-close">Close</button>
         </div>
-        <p id="library-status" role="status"></p>
+        <div id="library-scan">
+          <p id="library-status" role="status"></p>
+          <button type="button" id="library-rescan" hidden>Scan new</button>
+        </div>
       </div>
     </div>
     <script src="/app.js"></script>

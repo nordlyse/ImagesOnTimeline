@@ -1,0 +1,307 @@
+:root {
+  color: #1c1917;
+  background: #f4f1ec;
+  font-family: "Iowan Old Style", Palatino, "Palatino Linotype", Georgia, serif;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+header {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.7rem;
+  padding: 1rem 1.25rem 0.9rem;
+  text-align: center;
+  background: #0e0d14;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+h1 {
+  margin: 0;
+  max-width: 100%;
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+  font-size: clamp(1.6rem, 3vw, 2.35rem);
+  font-weight: 700;
+  letter-spacing: -0.035em;
+  line-height: 1.15;
+  background-image: linear-gradient(
+    90deg,
+    #40ffaa,
+    #4079ff,
+    #40ffaa,
+    #4079ff,
+    #40ffaa
+  );
+  background-size: 300% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  animation: title-gradient 8s linear infinite;
+}
+
+@keyframes title-gradient {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  h1 { animation: none; }
+}
+
+.header-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem 1.2rem;
+}
+
+#summary,
+#date-label,
+#hint,
+#date-start,
+#date-end {
+  margin: 0;
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+}
+
+#summary {
+  font-size: 1.08rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: #40ffaa;
+}
+
+#library-open,
+.library-actions button,
+.folder-choice,
+#step-back,
+#step-forward {
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+  color: #e7e5e4;
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  padding: 0.3rem 0.75rem;
+  cursor: pointer;
+}
+
+#library-open,
+#library-use {
+  font-weight: 600;
+  color: #06281c;
+  background: #40ffaa;
+  border-color: transparent;
+  padding: 0.45rem 1.05rem;
+}
+
+#library {
+  position: fixed;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: rgba(8, 7, 12, 0.72);
+}
+
+#library[hidden] { display: none; }
+
+#library-card {
+  width: min(32rem, 100%);
+  max-height: min(70vh, 36rem);
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+  padding: 1rem 1.1rem;
+  background: #0e0d14;
+  color: #e7e5e4;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+}
+
+#library-title {
+  margin: 0;
+  text-align: center;
+  font-size: 1.15rem;
+}
+
+#library-path,
+.library-note,
+#library-status {
+  margin: 0;
+  text-align: center;
+  color: #a8a29e;
+  font-size: 0.85rem;
+}
+
+#library-path { color: #e7e5e4; word-break: break-all; }
+
+#library-list {
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-height: 8rem;
+}
+
+.folder-choice {
+  border-radius: 8px;
+  text-align: left;
+}
+
+.library-actions {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+#stage {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background:
+    radial-gradient(ellipse at center, #241f33 0%, #121018 72%);
+  outline: none;
+}
+
+#stage:focus-visible {
+  box-shadow: inset 0 0 0 2px rgba(64, 255, 170, 0.35);
+}
+
+#empty {
+  margin: 1.2rem auto 0;
+  padding: 0.45rem 0.7rem;
+  color: #e7e5e4;
+  background: rgba(14, 13, 20, 0.88);
+  border-radius: 8px;
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+  font-size: 0.95rem;
+}
+
+#empty[hidden] { display: none; }
+
+#strip {
+  flex: 1;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.85rem;
+  padding: 1rem 0 0.2rem;
+  overflow: visible;
+}
+
+.frame {
+  --distance: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  opacity: calc(1 - var(--distance) * 0.1);
+}
+
+.frame img {
+  width: calc(46vh / (1 + var(--distance) * 1.15));
+  height: calc(46vh / (1 + var(--distance) * 1.15));
+  max-width: calc(68vw / (1 + var(--distance) * 1.15));
+  object-fit: contain;
+  background: #0e0d14;
+  border: 2px solid rgba(255, 255, 255, 0.14);
+  border-radius: 12px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.38);
+}
+
+.frame[aria-current="true"] img {
+  border-color: #40ffaa;
+}
+
+.frame span {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+  font-size: max(0.68rem, calc(0.92rem - var(--distance) * 0.08rem));
+  color: #a8a29e;
+}
+
+.frame[aria-current="true"] span {
+  color: #40ffaa;
+  font-weight: 650;
+}
+
+#timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.2rem 1.1rem 1rem;
+}
+
+#date-label {
+  min-height: 1.4rem;
+  text-align: center;
+  font-size: 1.15rem;
+  font-weight: 650;
+  color: #f5f5f4;
+}
+
+#rail {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr) auto auto;
+  gap: 0.55rem;
+  align-items: center;
+}
+
+#date-start,
+#date-end {
+  color: #a8a29e;
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+#scrub {
+  width: 100%;
+  accent-color: #40ffaa;
+  cursor: pointer;
+}
+
+#hint {
+  text-align: center;
+  color: #78716c;
+  font-size: 0.78rem;
+}
+
+@media (max-width: 720px) {
+  #rail {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
+  #date-start,
+  #date-end { display: none; }
+
+  .frame span { display: none; }
+
+  .frame[aria-current="true"] span { display: block; }
+}

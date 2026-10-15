@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Images on Timeline</title>
+    <link rel="stylesheet" href="/app.css">
+  </head>
+  <body>
+    <header>
+      <h1>Images on Timeline</h1>
+      <div class="header-tools">
+        <button type="button" id="library-open">Choose folder</button>
+        <p id="summary">Choose a folder</p>
+      </div>
+    </header>
+    <div id="stage" tabindex="0">
+      <p id="empty">Choose a folder to lay its pictures out on the timeline.</p>
+      <div id="strip"></div>
+      <div id="timeline">
+        <p id="date-label"></p>
+        <div id="rail">
+          <button type="button" id="step-back" aria-label="Previous picture">‹</button>
+          <span id="date-start"></span>
+          <input id="scrub" type="range" min="0" max="0" value="0" aria-label="Timeline">
+          <span id="date-end"></span>
+          <button type="button" id="step-forward" aria-label="Next picture">›</button>
+        </div>
+        <p id="hint">Arrow keys, the mouse wheel, or the timeline move through the pictures.</p>
+      </div>
+    </div>
+    <div id="library" hidden>
+      <div id="library-card" role="dialog" aria-modal="true" aria-labelledby="library-title">
+        <h2 id="library-title">Choose folder</h2>
+        <p id="library-path"></p>
+        <p class="library-note">Pictures stay in this folder. Showing it lays this folder and its subfolders out on the timeline.</p>
+        <div id="library-list"></div>
+        <div class="library-actions">
+          <button type="button" id="library-up">Up</button>
+          <button type="button" id="library-use">Show this folder</button>
+          <button type="button" id="library-close">Close</button>
+        </div>
+        <p id="library-status" role="status"></p>
+      </div>
+    </div>
+    <script src="/app.js"></script>
+  </body>
+</html>

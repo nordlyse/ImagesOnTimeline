@@ -112,9 +112,12 @@ function paint() {
     image.alt = "";
     image.addEventListener("load", alignStrip);
     image.src = `/api/pictures/${picture.id}/file`;
+    const shot = document.createElement("div");
+    shot.className = "shot";
+    shot.append(image);
     const caption = document.createElement("span");
     caption.textContent = formatDay(picture.captured_at);
-    button.append(image, caption);
+    button.append(shot, caption);
     button.addEventListener("click", () => select(position));
     strip.append(button);
   }

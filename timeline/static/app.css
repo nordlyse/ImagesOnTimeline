@@ -222,6 +222,12 @@ h1 {
   opacity: calc(1 - var(--distance) * 0.1);
 }
 
+.shot {
+  position: relative;
+  display: block;
+  line-height: 0;
+}
+
 .frame img {
   width: calc(46vh / (1 + var(--distance) * 1.15));
   height: calc(46vh / (1 + var(--distance) * 1.15));
@@ -233,8 +239,79 @@ h1 {
   box-shadow: 0 16px 40px rgba(0, 0, 0, 0.38);
 }
 
+@property --rainbow-turn {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+
+.frame[aria-current="true"] .shot {
+  --rainbow-turn: 0deg;
+  animation: rainbow-turn 8s linear infinite;
+}
+
+.frame[aria-current="true"] .shot::before,
+.frame[aria-current="true"] .shot::after {
+  content: "";
+  position: absolute;
+  z-index: 0;
+  background: conic-gradient(
+    from var(--rainbow-turn),
+    #ff4b4b,
+    #ff9a2e,
+    #ffe14a,
+    #5dff7a,
+    #3ee0ff,
+    #5b7cff,
+    #c86bff,
+    #ff4d9a,
+    #ff4b4b
+  );
+  pointer-events: none;
+  animation: rainbow-breathe 2.8s ease-in-out infinite;
+}
+
+.frame[aria-current="true"] .shot::before {
+  inset: -12px;
+  border-radius: 24px;
+  filter: blur(12px);
+}
+
+.frame[aria-current="true"] .shot::after {
+  inset: -6px;
+  border-radius: 18px;
+}
+
 .frame[aria-current="true"] img {
-  border-color: #40ffaa;
+  position: relative;
+  z-index: 1;
+  border-color: #0e0d14;
+}
+
+@keyframes rainbow-turn {
+  to { --rainbow-turn: 360deg; }
+}
+
+@keyframes rainbow-breathe {
+  0%, 100% { opacity: 0.72; filter: brightness(0.82); }
+  50% { opacity: 1; filter: brightness(1.18); }
+}
+
+.frame[aria-current="true"] .shot::before {
+  animation-name: rainbow-breathe-glow;
+}
+
+@keyframes rainbow-breathe-glow {
+  0%, 100% { opacity: 0.45; filter: blur(12px) brightness(0.82); }
+  50% { opacity: 0.9; filter: blur(12px) brightness(1.22); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .frame[aria-current="true"] .shot,
+  .frame[aria-current="true"] .shot::before,
+  .frame[aria-current="true"] .shot::after {
+    animation: none;
+  }
 }
 
 .frame span {

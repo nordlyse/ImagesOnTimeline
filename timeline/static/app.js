@@ -11,6 +11,7 @@ const REACH = 5;
 
 let pictures = [];
 let index = 0;
+let scannedAt = null;
 let wheelBudget = 0;
 let drag = null;
 
@@ -89,6 +90,9 @@ function paint() {
   scrub.disabled = pictures.length === 0;
   if (pictures.length === 0) {
     empty.hidden = false;
+    empty.textContent = scannedAt
+      ? "This folder has no pictures."
+      : "Choose a folder to lay its pictures out on the timeline.";
     dateLabel.textContent = "";
     dateStart.textContent = "";
     dateEnd.textContent = "";
@@ -207,6 +211,7 @@ function bindLibrary() {
     const response = await fetch("/api/library");
     if (!response.ok) return;
     const body = await response.json();
+    scannedAt = body.scanned_at || null;
     if (body.label) {
       currentLabel = body.label;
       openButton.textContent = folderName(body.label);
@@ -233,6 +238,7 @@ function bindLibrary() {
     parentLabel = view.parent;
     pathLabel.textContent = view.label;
     upButton.disabled = view.parent == null;
+    if (view.scanned_at) status.textContent = `Scanned ${formatDay(view.scanned_at)}`;
     list.replaceChildren();
     if (view.entries.length === 0) {
       const note = document.createElement("p");
@@ -255,7 +261,7 @@ function bindLibrary() {
     if (busy) return;
     busy = true;
     useButton.disabled = true;
-    status.textContent = "Scanning folder";
+    status.textContent = "Opening folder";
     const response = await fetch("/api/library", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -269,8 +275,9 @@ function bindLibrary() {
     }
     const body = await response.json();
     currentLabel = body.label;
+    scannedAt = body.scanned_at || null;
     openButton.textContent = folderName(body.label);
-    status.textContent = body.files === 1 ? "1 picture" : `${body.files} pictures`;
+    status.textContent = pictureSummary(body.files);
     summary.textContent = status.textContent;
     dialog.hidden = true;
     await loadPictures();
@@ -286,8 +293,14 @@ async function loadPictures() {
   }
   pictures = await response.json();
   index = 0;
-  summary.textContent = pictures.length === 1 ? "1 picture" : `${pictures.length} pictures`;
+  summary.textContent = pictureSummary(pictures.length);
   paint();
+}
+
+function pictureSummary(count) {
+  const text = count === 1 ? "1 picture" : `${count} pictures`;
+  if (!scannedAt) return text;
+  return `${text}, scanned ${formatDay(scannedAt)}`;
 }
 
 function folderName(label) {

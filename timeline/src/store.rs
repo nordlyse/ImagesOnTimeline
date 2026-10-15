@@ -1,11 +1,12 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use chrono::{DateTime, NaiveDateTime, Utc};
 
-use crate::scan::{Picture, StoredPicture};
+use crate::scan::{arrange_pictures, Picture, StoredPicture};
 
 const PREPARE_PICTURES: &str = "\
 CREATE TABLE IF NOT EXISTS picture (
@@ -19,6 +20,22 @@ CREATE TABLE IF NOT EXISTS picture (
   ts TIMESTAMP TIME INDEX,
   PRIMARY KEY(folder, file_path)
 )";
+
+const PREPARE_FOLDERS: &str = "\
+CREATE TABLE IF NOT EXISTS folder_scan (
+  folder STRING,
+  scanned_at TIMESTAMP,
+  picture_count BIGINT,
+  ts TIMESTAMP TIME INDEX,
+  PRIMARY KEY(folder)
+)";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FolderScan {
+    pub folder: String,
+    pub scanned_at: DateTime<Utc>,
+    pub picture_count: i64,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Catalog {
@@ -81,7 +98,100 @@ impl Catalog {
 
 impl Session {
     pub fn prepare(&mut self) -> Result<(), String> {
-        self.query(PREPARE_PICTURES).map(|_| ())
+        self.query(PREPARE_PICTURES)?;
+        self.query(PREPARE_FOLDERS).map(|_| ())
+    }
+
+    pub fn load_latest_scan(&mut self) -> Result<Option<FolderScan>, String> {
+        let rows = self.query(
+            "SELECT folder, scanned_at, picture_count FROM folder_scan ORDER BY ts DESC LIMIT 1",
+        )?;
+        Ok(rows.into_iter().find_map(|row| parse_scan(&row)))
+    }
+
+    pub fn load_scan(&mut self, folder: &str) -> Result<Option<FolderScan>, String> {
+        let sql = format!(
+            "SELECT folder, scanned_at, picture_count FROM folder_scan WHERE folder = {} ORDER BY ts DESC LIMIT 1",
+            sql_string(folder)
+        );
+        let rows = self.query(&sql)?;
+        Ok(rows.into_iter().find_map(|row| parse_scan(&row)))
+    }
+
+    pub fn save_scan(&mut self, folder: &str, scanned_at: DateTime<Utc>, picture_count: i64) -> Result<(), String> {
+        let when = scanned_at.format("%Y-%m-%d %H:%M:%S");
+        let sql = format!(
+            "INSERT INTO folder_scan (folder, scanned_at, picture_count, ts) VALUES ({}, '{when}', {}, '{when}')",
+            sql_string(folder),
+            picture_count.max(0)
+        );
+        self.query(&sql).map(|_| ())
+    }
+
+    pub fn latest_stored_folder(&mut self) -> Result<Option<String>, String> {
+        let rows = self.query("SELECT folder FROM picture ORDER BY ts DESC LIMIT 1")?;
+        Ok(rows
+            .into_iter()
+            .next()
+            .and_then(|row| row.into_iter().next().flatten())
+            .filter(|folder| !folder.is_empty()))
+    }
+
+    pub fn latest_stored_time(&mut self, folder: &str) -> Result<Option<DateTime<Utc>>, String> {
+        let sql = format!(
+            "SELECT ts FROM picture WHERE folder = {} ORDER BY ts DESC LIMIT 1",
+            sql_string(folder)
+        );
+        let rows = self.query(&sql)?;
+        Ok(rows
+            .into_iter()
+            .next()
+            .and_then(|row| row.into_iter().next().flatten())
+            .as_deref()
+            .and_then(parse_timestamp))
+    }
+
+    pub fn load_pictures(&mut self, folder: &str) -> Result<Vec<Picture>, String> {
+        let sql = format!(
+            "SELECT file_path, file_name, captured_at, latitude, longitude, place FROM picture WHERE folder = {} ORDER BY ts DESC",
+            sql_string(folder)
+        );
+        let rows = self.query(&sql)?;
+        let mut pictures = Vec::new();
+        let mut seen = HashSet::new();
+        for row in rows {
+            let Some(path) = row.first().and_then(|value| value.clone()).filter(|value| !value.is_empty()) else {
+                continue;
+            };
+            if !seen.insert(path.clone()) {
+                continue;
+            }
+            let Some(captured_at) = row.get(2).and_then(|value| value.as_deref()).and_then(parse_timestamp) else {
+                continue;
+            };
+            let name = row
+                .get(1)
+                .and_then(|value| value.clone())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| {
+                    Path::new(&path)
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or(&path)
+                        .to_string()
+                });
+            pictures.push(Picture {
+                id: 0,
+                path: PathBuf::from(&path),
+                captured_at,
+                name,
+                latitude: row.get(3).and_then(|value| value.as_deref()).and_then(parse_number),
+                longitude: row.get(4).and_then(|value| value.as_deref()).and_then(parse_number),
+                place: row.get(5).and_then(|value| value.clone()).filter(|value| !value.is_empty()),
+            });
+        }
+        arrange_pictures(&mut pictures);
+        Ok(pictures)
     }
 
     pub fn load_folder(&mut self, folder: &str) -> Result<HashMap<String, StoredPicture>, String> {
@@ -156,7 +266,8 @@ impl Session {
 
     #[cfg(test)]
     pub fn remove_folder(&mut self, folder: &str) -> Result<(), String> {
-        self.query(&format!("DELETE FROM picture WHERE folder = {}", sql_string(folder)))
+        self.query(&format!("DELETE FROM picture WHERE folder = {}", sql_string(folder)))?;
+        self.query(&format!("DELETE FROM folder_scan WHERE folder = {}", sql_string(folder)))
             .map(|_| ())
     }
 
@@ -260,6 +371,30 @@ fn sql_number(value: Option<f64>) -> String {
 fn parse_number(value: &str) -> Option<f64> {
     let number = value.trim().parse::<f64>().ok()?;
     number.is_finite().then_some(number)
+}
+
+fn parse_scan(row: &[Option<String>]) -> Option<FolderScan> {
+    let folder = row.first().and_then(|value| value.clone()).filter(|value| !value.is_empty())?;
+    let scanned_at = row.get(1).and_then(|value| value.as_deref()).and_then(parse_timestamp)?;
+    let picture_count = row
+        .get(2)
+        .and_then(|value| value.as_deref())
+        .and_then(parse_count)
+        .unwrap_or(0);
+    Some(FolderScan {
+        folder,
+        scanned_at,
+        picture_count,
+    })
+}
+
+fn parse_count(value: &str) -> Option<i64> {
+    let text = value.trim();
+    text.parse::<i64>()
+        .ok()
+        .or_else(|| text.parse::<f64>().ok().and_then(|number| {
+            number.is_finite().then_some(number.trunc() as i64)
+        }))
 }
 
 fn parse_timestamp(value: &str) -> Option<DateTime<Utc>> {
@@ -407,6 +542,15 @@ mod tests {
         session.remove_folder(&folder).unwrap();
         session.save_pictures(&folder, &[&picture]).unwrap();
         let known = session.load_folder(&folder).unwrap();
+        let stored_folder = session.latest_stored_folder().unwrap();
+        let stored_time = session.latest_stored_time(&folder).unwrap();
+        let earlier = parse_timestamp("2014-03-22 18:04:05").unwrap();
+        let scanned_at = parse_timestamp("2015-01-01 00:00:00").unwrap();
+        session.save_scan(&folder, earlier, 1).unwrap();
+        session.save_scan(&folder, scanned_at, 2).unwrap();
+        let scan = session.load_scan(&folder).unwrap().expect("stored folder");
+        session.load_latest_scan().unwrap();
+        let pictures = session.load_pictures(&folder).unwrap();
         session.remove_folder(&folder).unwrap();
 
         let stored = known.get(&path).expect("stored picture");
@@ -414,5 +558,14 @@ mod tests {
         assert_eq!(stored.latitude, Some(41.01));
         assert_eq!(stored.longitude, Some(28.97));
         assert_eq!(stored.place.as_deref(), Some("Istanbul"));
+        assert_eq!(stored_folder.as_deref(), Some(folder.as_str()));
+        assert!(stored_time.is_some());
+        assert_eq!(scan.folder, folder);
+        assert_eq!(scan.scanned_at, scanned_at);
+        assert_eq!(scan.picture_count, 2);
+        assert_eq!(pictures.len(), 1);
+        assert_eq!(pictures[0].name, "kept.jpg");
+        assert_eq!(pictures[0].place.as_deref(), Some("Istanbul"));
+        assert!(session.load_scan(&folder).unwrap().is_none());
     }
 }

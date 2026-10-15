@@ -107,6 +107,11 @@ pub fn scan_folder(folder: &Path, known: &HashMap<String, StoredPicture>) -> Vec
         "scanned {folders} folders, {} pictures, {reused} already stored",
         pictures.len()
     );
+    arrange_pictures(&mut pictures);
+    pictures
+}
+
+pub fn arrange_pictures(pictures: &mut Vec<Picture>) {
     pictures.sort_by(|left, right| {
         left.captured_at
             .cmp(&right.captured_at)
@@ -116,7 +121,6 @@ pub fn scan_folder(folder: &Path, known: &HashMap<String, StoredPicture>) -> Vec
     for (offset, picture) in pictures.iter_mut().enumerate() {
         picture.id = i64::try_from(offset).unwrap_or(i64::MAX) + 1;
     }
-    pictures
 }
 
 fn skip_directory(name: &str) -> bool {

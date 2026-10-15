@@ -37,8 +37,9 @@ docker compose up database
 | Database | public |
 | Password | none |
 | Data | volume `database_data`, mounted at `/greptimedb_data` |
-| Table | `picture` |
-| Stored fields | folder, file path, file name, capture time, latitude, longitude, place |
+| Tables | `picture`, `folder_scan` |
+| Picture fields | folder, file path, file name, capture time, latitude, longitude, place |
+| Folder fields | folder, scan time, picture count |
 | Licence | Apache-2.0 |
 
 ```bash
@@ -51,7 +52,7 @@ Showing a folder walks that folder and its subfolders. Hidden names are left out
 
 Each picture is placed by its capture time. JPEG, PNG, and TIFF dates are read from the start of the file. A phone photo stored as HEIC, HEIF, or AVIF keeps its date near either end of the file, so only those edges are read. When a file has no capture time, the file time is used instead. Latitude and longitude are read from the same record when the camera stored them. A place name is read when the file carries one.
 
-The scan stores that record in GreptimeDB: the file name, the capture time, and the place or coordinates when they are present. The next scan of the same folder matches those file names. A name that is already stored is not opened again. A new name is read and then stored.
+The scan stores that record in GreptimeDB: the file name, the capture time, and the place or coordinates when they are present. It also stores a folder record with the scan time and the picture count. When the page opens again, the latest stored folder is shown and its files are not read again. Choosing another folder that already has a stored scan opens that scan directly. A folder with no stored scan is read once, and that scan is kept.
 
 Supported pictures are JPEG, PNG, GIF, WebP, BMP, TIFF, HEIC, HEIF, and AVIF. A phone photo stored as HEIC or HEIF is sent as JPEG, because most browsers do not draw HEIC.
 

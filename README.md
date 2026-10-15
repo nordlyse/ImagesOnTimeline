@@ -42,4 +42,25 @@ Move with:
 
 ## Libraries
 
-The page and the scan live in `timeline/`. The timeline service is MIT. Its libraries are MIT or Apache-2.0, including Chrono, heic-rs, and jpeg-encoder.
+The page and the scan live in `timeline/`. The timeline service is MIT. Every library it builds with is MIT or Apache-2.0.
+
+| Tool | Version | Licence |
+| --- | --- | --- |
+| timeline | 0.1.0 | MIT |
+| chrono | 0.4.45 | MIT OR Apache-2.0 |
+| heic-rs | 0.1.4 | MIT OR Apache-2.0 |
+| jpeg-encoder | 0.6.0 | MIT OR Apache-2.0 |
+| rayon | 1.12.0 | MIT OR Apache-2.0 |
+| rayon-core | 1.13.0 | MIT OR Apache-2.0 |
+| crossbeam-deque | 0.8.8 | MIT OR Apache-2.0 |
+| crossbeam-epoch | 0.9.21 | MIT OR Apache-2.0 |
+| crossbeam-utils | 0.8.23 | MIT OR Apache-2.0 |
+| either | 1.19.0 | MIT OR Apache-2.0 |
+| iana-time-zone | 0.1.65 | MIT OR Apache-2.0 |
+| num-traits | 0.2.19 | MIT OR Apache-2.0 |
+| autocfg | 1.5.1 | Apache-2.0 OR MIT |
+| cfg-if | 1.0.5 | MIT OR Apache-2.0 |
+| libc | 0.2.190 | MIT OR Apache-2.0 |
+| core-foundation-sys | 0.8.7 | MIT OR Apache-2.0 |
+
+`core-foundation-sys` is linked only when the service is built on Apple. `filetime` 0.2.29 is used only by the tests. Its licence is MIT OR Apache-2.0.

@@ -18,7 +18,26 @@ The page is at <http://localhost:8080>. Choose a folder in the header. That fold
 
 The service is the `timeline` container. It listens on port 8080 and mounts those three folders read-only.
 
-Compose also starts GreptimeDB 1.2.1, a database written in Rust. Its core is Apache-2.0. The published image leaves out the separate enterprise licence. PostgreSQL clients reach it on port 4003:
+## Database
+
+GreptimeDB is the database in Compose. It is written in Rust and speaks the PostgreSQL wire protocol. The service name is `database`. The image is `greptime/greptimedb:v1.2.1`. Its core is Apache-2.0. The published image leaves out the separate enterprise licence.
+
+Start the database:
+
+```bash
+docker compose up database
+```
+
+| Setting | Value |
+| --- | --- |
+| Host on this machine | 127.0.0.1 |
+| Host inside Compose | database |
+| Port | 4003 |
+| User | greptime |
+| Database | public |
+| Password | none |
+| Data | volume `database_data`, mounted at `/greptimedb_data` |
+| Licence | Apache-2.0 |
 
 ```bash
 psql -h 127.0.0.1 -p 4003 -d public -U greptime
@@ -69,8 +88,4 @@ The page and the scan live in `timeline/`. The timeline service is MIT. Every li
 | libc | 0.2.190 | MIT OR Apache-2.0 |
 | core-foundation-sys | 0.8.7 | MIT OR Apache-2.0 |
 
-`core-foundation-sys` is linked only when the service is built on Apple. `filetime` 0.2.29 is used only by the tests. Its licence is MIT OR Apache-2.0.
-
-| Tool | Version | Licence |
-| --- | --- | --- |
-| GreptimeDB | 1.2.1 | Apache-2.0 |
+`core-foundation-sys` is linked only when the service is built on Apple. `filetime` 0.2.29 is used only by the tests. Its licence is MIT OR Apache-2.0. GreptimeDB 1.2.1, the database in Compose, is Apache-2.0.

@@ -167,6 +167,7 @@ fn choose_library(state: &AppState, body: &[u8]) -> Outgoing {
     let Some(requested) = json_path(&String::from_utf8_lossy(body)) else {
         return text(400, "Choose a folder.");
     };
+    eprintln!("show folder {requested}");
     let scanned = match scan_chosen(&state.inner.library_root, &state.inner.host_label, &requested) {
         Ok(scanned) => scanned,
         Err(message) => return text(400, &message),

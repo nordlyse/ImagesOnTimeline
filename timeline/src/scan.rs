@@ -1,5 +1,5 @@
-use std::fs;
-use std::io::Read;
+use std::fs::{self, File};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -21,9 +21,15 @@ pub fn is_image(path: &Path) -> bool {
 }
 
 pub fn scan_folder(folder: &Path) -> Vec<Picture> {
+    eprintln!("scanning {}", folder.display());
     let mut pictures = Vec::new();
+    let mut folders = 0usize;
     let mut pending = vec![folder.to_path_buf()];
     while let Some(dir) = pending.pop() {
+        folders += 1;
+        if folders % 100 == 0 {
+            eprintln!("scanned {folders} folders, {} pictures", pictures.len());
+        }
         let entries = match fs::read_dir(&dir) {
             Ok(entries) => entries,
             Err(_) => continue,
@@ -32,7 +38,7 @@ pub fn scan_folder(folder: &Path) -> Vec<Picture> {
             let Some(name) = entry.file_name().to_str().map(str::to_string) else {
                 continue;
             };
-            if name.starts_with('.') {
+            if name.starts_with('.') || skip_directory(&name) {
                 continue;
             }
             let path = entry.path();
@@ -58,8 +64,12 @@ pub fn scan_folder(folder: &Path) -> Vec<Picture> {
                 captured_at,
                 name,
             });
+            if pictures.len() % 200 == 0 {
+                eprintln!("scanned {folders} folders, {} pictures", pictures.len());
+            }
         }
     }
+    eprintln!("scanned {folders} folders, {} pictures", pictures.len());
     pictures.sort_by(|left, right| {
         left.captured_at
             .cmp(&right.captured_at)
@@ -72,13 +82,85 @@ pub fn scan_folder(folder: &Path) -> Vec<Picture> {
     pictures
 }
 
+fn skip_directory(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "node_modules"
+            | "target"
+            | "dist"
+            | "build"
+            | "vendor"
+            | "pods"
+            | "deriveddata"
+            | "coverage"
+            | "__pycache__"
+            | "venv"
+            | "out"
+            | "bin"
+            | "obj"
+    )
+}
+
 fn metadata_time(path: &Path) -> Option<DateTime<Utc>> {
     match extension(path).as_str() {
-        "jpg" | "jpeg" => jpeg_date(&read_prefix(path, 1_048_576)?),
-        "png" | "tif" | "tiff" => tiff_or_png_date(&read_prefix(path, 1_048_576)?),
-        "heic" | "heif" | "avif" => heic_date(&fs::read(path).ok()?),
+        "jpg" | "jpeg" => jpeg_date(&read_prefix(path, 262_144)?),
+        "png" | "tif" | "tiff" => tiff_or_png_date(&read_prefix(path, 262_144)?),
+        "heic" | "heif" | "avif" => bounded_exif_date(path),
         _ => None,
     }
+}
+
+/// Phone photos keep the capture time near either end of the file. Reading the
+/// whole file stalls a large folder, so only those edges are checked.
+fn bounded_exif_date(path: &Path) -> Option<DateTime<Utc>> {
+    const WINDOW: u64 = 512 * 1024;
+    let mut file = File::open(path).ok()?;
+    let length = file.metadata().ok()?.len();
+    if length == 0 {
+        return None;
+    }
+    let head_len = usize::try_from(length.min(WINDOW)).ok()?;
+    let mut head = vec![0; head_len];
+    file.read_exact(&mut head).ok()?;
+    if let Some(when) = find_exif_date(&head) {
+        return Some(when);
+    }
+    if length <= WINDOW {
+        return None;
+    }
+    let tail_len = usize::try_from(WINDOW.min(length - WINDOW)).ok()?;
+    file.seek(SeekFrom::End(-(tail_len as i64))).ok()?;
+    let mut tail = vec![0; tail_len];
+    file.read_exact(&mut tail).ok()?;
+    find_exif_date(&tail)
+}
+
+fn find_exif_date(bytes: &[u8]) -> Option<DateTime<Utc>> {
+    if bytes.len() < 19 {
+        return None;
+    }
+    let mut index = 0;
+    while index + 19 <= bytes.len() {
+        if is_exif_date(&bytes[index..index + 19]) {
+            let text = std::str::from_utf8(&bytes[index..index + 19]).ok()?;
+            if let Some(when) = parse_exif_text(text) {
+                return Some(when);
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
+fn is_exif_date(bytes: &[u8]) -> bool {
+    bytes.len() == 19
+        && bytes[4] == b':'
+        && bytes[7] == b':'
+        && bytes[10] == b' '
+        && bytes[13] == b':'
+        && bytes[16] == b':'
+        && bytes[..4].iter().chain(bytes[5..7].iter()).chain(bytes[8..10].iter()).all(u8::is_ascii_digit)
+        && bytes[11..13].iter().chain(bytes[14..16].iter()).chain(bytes[17..19].iter()).all(u8::is_ascii_digit)
 }
 
 fn tiff_or_png_date(bytes: &[u8]) -> Option<DateTime<Utc>> {
@@ -163,12 +245,6 @@ fn png_date(bytes: &[u8]) -> Option<DateTime<Utc>> {
         index = end + 4;
     }
     None
-}
-
-fn heic_date(bytes: &[u8]) -> Option<DateTime<Utc>> {
-    let context = heic_rs::context::Context::open(bytes).ok()?;
-    let tiff = context.exif(context.meta.primary).ok()??;
-    tiff_date(tiff)
 }
 
 fn tiff_date(bytes: &[u8]) -> Option<DateTime<Utc>> {
@@ -290,6 +366,15 @@ mod tests {
         let when = parse_exif_text("2014:03:22 18:04:05").unwrap();
         assert_eq!(when.format("%Y-%m-%d %H:%M:%S").to_string(), "2014-03-22 18:04:05");
         assert!(parse_exif_text("not a date").is_none());
+    }
+
+    #[test]
+    fn reads_an_exif_date_inside_a_byte_window() {
+        let mut bytes = vec![0; 40];
+        bytes.extend_from_slice(b"2014:03:22 18:04:05");
+        let when = find_exif_date(&bytes).unwrap();
+        assert_eq!(when.format("%Y-%m-%d %H:%M:%S").to_string(), "2014-03-22 18:04:05");
+        assert!(find_exif_date(b"2014-03-22 18:04:05").is_none());
     }
 
     #[test]

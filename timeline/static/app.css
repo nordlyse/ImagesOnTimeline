@@ -247,7 +247,7 @@ h1 {
 
 .frame[aria-current="true"] .shot {
   --rainbow-turn: 0deg;
-  animation: rainbow-turn 8s linear infinite;
+  animation: rainbow-turn 24s linear infinite;
 }
 
 .frame[aria-current="true"] .shot::before,

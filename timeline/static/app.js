@@ -2,7 +2,8 @@ const stage = document.querySelector("#stage");
 const strip = document.querySelector("#strip");
 const empty = document.querySelector("#empty");
 const summary = document.querySelector("#summary");
-const dateLabel = document.querySelector("#date-label");
+const dateText = document.querySelector("#date-text");
+const datePlace = document.querySelector("#date-place");
 const dateStart = document.querySelector("#date-start");
 const dateEnd = document.querySelector("#date-end");
 const scrub = document.querySelector("#scrub");
@@ -93,7 +94,9 @@ function paint() {
     empty.textContent = scannedAt
       ? "This folder has no pictures."
       : "Choose a folder to lay its pictures out on the timeline.";
-    dateLabel.textContent = "";
+    dateText.textContent = "";
+    datePlace.textContent = "";
+    datePlace.hidden = true;
     dateStart.textContent = "";
     dateEnd.textContent = "";
     scrub.max = "0";
@@ -111,7 +114,7 @@ function paint() {
     button.className = "frame";
     button.style.setProperty("--distance", String(distance));
     if (position === index) button.setAttribute("aria-current", "true");
-    button.setAttribute("aria-label", `${picture.name}, ${formatDate(picture.captured_at)}`);
+    button.setAttribute("aria-label", pictureLabel(picture));
     const image = document.createElement("img");
     image.alt = "";
     image.addEventListener("load", alignStrip);
@@ -130,7 +133,7 @@ function paint() {
   }
   scrub.max = String(pictures.length - 1);
   scrub.value = String(index);
-  dateLabel.textContent = formatDate(pictures[index].captured_at);
+  showWhen(pictures[index]);
   dateStart.textContent = formatDay(pictures[0].captured_at);
   dateEnd.textContent = formatDay(pictures[pictures.length - 1].captured_at);
   requestAnimationFrame(alignStrip);
@@ -156,6 +159,20 @@ function alignStrip() {
 }
 
 window.addEventListener("resize", alignStrip);
+
+function showWhen(picture) {
+  dateText.textContent = formatDate(picture.captured_at);
+  const place = typeof picture.place === "string" ? picture.place.trim() : "";
+  datePlace.textContent = place;
+  datePlace.hidden = place.length === 0;
+}
+
+function pictureLabel(picture) {
+  const when = formatDate(picture.captured_at);
+  const place = typeof picture.place === "string" ? picture.place.trim() : "";
+  if (!place) return `${picture.name}, ${when}`;
+  return `${picture.name}, ${when}, ${place}`;
+}
 
 function formatDate(value) {
   const when = new Date(value);

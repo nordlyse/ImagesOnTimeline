@@ -4,7 +4,7 @@ Images on Timeline lays out the pictures in a shown folder, and in every subfold
 
 Move along that timeline with the keyboard or the mouse. The picture at the current position is large, in the center, above the timeline. On its left and right, pictures from the nearest dates — or from the same date — appear a little smaller. Beside those, the next pictures are smaller still, and the ones beyond them smaller again. The row reads like a film strip: largest in the middle, and smaller toward each side.
 
-When the date changes, the pictures change with it.
+When the date changes, the pictures change with it. The center picture is ringed by a rainbow, and those colors turn clockwise. The pictures on either side stay plain.
 
 ## Run
 
@@ -58,7 +58,7 @@ Supported pictures are JPEG, PNG, GIF, WebP, BMP, TIFF, HEIC, HEIF, and AVIF. A 
 
 ## Moving along the strip
 
-The current picture stays in the center. The timeline under it shows that picture's date, with the first and last dates at the ends.
+The current picture stays in the center. The timeline under it shows that picture's date, with the first and last dates at the ends. When the picture has a place name, that place is shown under the date. A colored light lies behind that timeline, and the slider sits in the middle of the light. The slider is solid, so the colors show around it. A brighter step travels to the right, then back to the left, and keeps going.
 
 Move with:
 

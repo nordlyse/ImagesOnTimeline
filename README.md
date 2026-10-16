@@ -58,7 +58,7 @@ Supported pictures are JPEG, PNG, GIF, WebP, BMP, TIFF, HEIC, HEIF, and AVIF. A 
 
 ## Moving along the strip
 
-The current picture stays in the center. The timeline under it shows that picture's date, with the first and last dates at the ends. A colored light lies behind that timeline, and the slider sits in the middle of the light. The slider is solid, so the colors show around it. A brighter step travels to the right, then back to the left, and keeps going.
+The current picture stays in the center. The timeline under it shows that picture's date, with the first and last dates at the ends. When the picture has a place name, that place is shown under the date. A colored light lies behind that timeline, and the slider sits in the middle of the light. The slider is solid, so the colors show around it. A brighter step travels to the right, then back to the left, and keeps going.
 
 Move with:
 

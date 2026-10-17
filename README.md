@@ -56,6 +56,14 @@ The scan stores that record in GreptimeDB: the file name, the capture time, and 
 
 Supported pictures are JPEG, PNG, GIF, WebP, BMP, TIFF, HEIC, HEIF, and AVIF. A phone photo stored as HEIC or HEIF is sent as JPEG, because most browsers do not draw HEIC.
 
+## Picture names
+
+`GET /api/pictures/names` returns the file name of every picture in the shown folder, in timeline order.
+
+`GET /api/pictures/names?from=2012-01-01&to=2012-12-06` returns only the names whose capture time falls in that range. A day includes the whole day. A time such as `2012-12-06T15:46:01Z` is exact. Either bound may be left off. A reversed range, or a value that is not a date, is refused.
+
+`GET /api/pictures/file?name=photo.jpg` downloads that one picture. The name is the file name from the list above. When more than one picture has that name, nothing is downloaded.
+
 ## Moving along the strip
 
 The current picture stays in the center. The timeline under it shows that picture's date, with the first and last dates at the ends. When the picture has a place name, that place is shown under the date. A colored light lies behind that timeline, and the slider sits in the middle of the light. The slider is solid, so the colors show around it. A brighter step travels to the right, then back to the left, and keeps going.

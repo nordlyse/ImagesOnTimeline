@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, NaiveDate, NaiveTime, SecondsFormat, TimeZone, Utc};
 
 use crate::files::read_picture;
 use crate::library::{display_label, list_folders, resolve_folder, FolderView};
@@ -59,6 +59,7 @@ struct Outgoing {
     status: u16,
     content_type: &'static str,
     cache: Option<&'static str>,
+    file_name: Option<String>,
     body: Vec<u8>,
 }
 
@@ -141,6 +142,12 @@ fn route(state: AppState, request: Incoming) -> Outgoing {
     }
     if request.method == "GET" && request.path == "/api/pictures" {
         return picture_list(&state);
+    }
+    if request.method == "GET" && request.path == "/api/pictures/names" {
+        return picture_names(&state, &request.query);
+    }
+    if request.method == "GET" && request.path == "/api/pictures/file" {
+        return picture_download(&state, &request.query);
     }
     if request.method == "GET" {
         if let Some(id) = request
@@ -253,6 +260,123 @@ fn picture_list(state: &AppState) -> Outgoing {
     json(200, body)
 }
 
+fn picture_names(state: &AppState, query: &str) -> Outgoing {
+    let from = match range_bound(query, "from", false) {
+        Ok(bound) => bound,
+        Err(message) => return text(400, &message),
+    };
+    let to = match range_bound(query, "to", true) {
+        Ok(bound) => bound,
+        Err(message) => return text(400, &message),
+    };
+    if let (Some(from), Some(to)) = (from, to) {
+        if from > to {
+            return text(400, "The start date is after the end date.");
+        }
+    }
+    let library = match state.inner.library.lock() {
+        Ok(library) => library,
+        Err(_) => return text(500, "The picture query stopped."),
+    };
+    let mut body = String::from("[");
+    let mut first = true;
+    for picture in library.pictures.iter() {
+        if !in_range(picture.captured_at, from, to) {
+            continue;
+        }
+        if !first {
+            body.push(',');
+        }
+        first = false;
+        body.push_str(&json_string(&picture.name));
+    }
+    body.push(']');
+    json(200, body)
+}
+
+fn picture_download(state: &AppState, query: &str) -> Outgoing {
+    let name = query_value(query, "name");
+    let name = name.trim();
+    if name.is_empty() {
+        return text(400, "Choose a picture name.");
+    }
+    let stored = {
+        let library = match state.inner.library.lock() {
+            Ok(library) => library,
+            Err(_) => return text(500, "The picture query stopped."),
+        };
+        let mut matches = library
+            .pictures
+            .iter()
+            .filter(|picture| picture.name == name)
+            .map(|picture| picture.path.clone());
+        let Some(path) = matches.next() else {
+            return text(404, "That picture was not found.");
+        };
+        if matches.next().is_some() {
+            return text(400, "More than one picture has that name.");
+        }
+        path
+    };
+    match read_picture(&state.inner.library_root, &stored) {
+        Some((bytes, content_type)) => Outgoing {
+            status: 200,
+            content_type,
+            cache: Some("private, max-age=3600"),
+            file_name: Some(download_name(name, content_type)),
+            body: bytes,
+        },
+        None => text(404, "That picture was not found."),
+    }
+}
+
+fn in_range(captured_at: DateTime<Utc>, from: Option<DateTime<Utc>>, to: Option<DateTime<Utc>>) -> bool {
+    if let Some(from) = from {
+        if captured_at < from {
+            return false;
+        }
+    }
+    if let Some(to) = to {
+        if captured_at > to {
+            return false;
+        }
+    }
+    true
+}
+
+fn range_bound(query: &str, key: &str, end_of_day: bool) -> Result<Option<DateTime<Utc>>, String> {
+    let value = query_value(query, key);
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    parse_bound(value, end_of_day).map(Some)
+}
+
+fn parse_bound(value: &str, end_of_day: bool) -> Result<DateTime<Utc>, String> {
+    if let Ok(when) = DateTime::parse_from_rfc3339(value) {
+        return Ok(when.with_timezone(&Utc));
+    }
+    let Ok(date) = NaiveDate::parse_from_str(value, "%Y-%m-%d") else {
+        return Err("Use a date such as 2012-12-06.".to_string());
+    };
+    let time = if end_of_day {
+        NaiveTime::from_hms_nano_opt(23, 59, 59, 999_999_999).unwrap()
+    } else {
+        NaiveTime::from_hms_opt(0, 0, 0).unwrap()
+    };
+    Ok(Utc.from_utc_datetime(&date.and_time(time)))
+}
+
+fn download_name(name: &str, content_type: &str) -> String {
+    let lower = name.to_ascii_lowercase();
+    if content_type == "image/jpeg" && !lower.ends_with(".jpg") && !lower.ends_with(".jpeg") {
+        let stem = name.rsplit_once('.').map_or(name, |(stem, _)| stem);
+        return format!("{stem}.jpg");
+    }
+    name.to_string()
+}
+
 fn picture_file(state: &AppState, id: i64) -> Outgoing {
     let stored = {
         let library = match state.inner.library.lock() {
@@ -273,6 +397,7 @@ fn picture_file(state: &AppState, id: i64) -> Outgoing {
             status: 200,
             content_type,
             cache: Some("private, max-age=3600"),
+            file_name: None,
             body: bytes,
         },
         None => text(404, "That picture was not found."),
@@ -600,6 +725,11 @@ fn write_response(stream: &mut TcpStream, response: &Outgoing) -> Result<(), Str
         head.push_str(cache);
         head.push_str("\r\n");
     }
+    if let Some(name) = &response.file_name {
+        head.push_str("Content-Disposition: ");
+        head.push_str(&content_disposition(name));
+        head.push_str("\r\n");
+    }
     head.push_str("\r\n");
     stream.write_all(head.as_bytes()).map_err(|err| err.to_string())?;
     stream.write_all(&response.body).map_err(|err| err.to_string())?;
@@ -717,11 +847,33 @@ fn json_string(value: &str) -> String {
     out
 }
 
+fn content_disposition(name: &str) -> String {
+    let mut quoted = String::new();
+    let mut encoded = String::new();
+    for ch in name.chars() {
+        if ch == '"' || ch == '\\' || ch.is_control() {
+            quoted.push('_');
+        } else {
+            quoted.push(ch);
+        }
+        let mut buf = [0; 4];
+        for byte in ch.encode_utf8(&mut buf).bytes() {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_') {
+                encoded.push(byte as char);
+            } else {
+                encoded.push_str(&format!("%{byte:02X}"));
+            }
+        }
+    }
+    format!("attachment; filename=\"{quoted}\"; filename*=UTF-8''{encoded}")
+}
+
 fn page(body: &'static str, content_type: &'static str) -> Outgoing {
     Outgoing {
         status: 200,
         content_type,
         cache: Some("no-cache"),
+        file_name: None,
         body: body.as_bytes().to_vec(),
     }
 }
@@ -731,6 +883,7 @@ fn json(status: u16, body: String) -> Outgoing {
         status,
         content_type: "application/json",
         cache: None,
+        file_name: None,
         body: body.into_bytes(),
     }
 }
@@ -740,6 +893,109 @@ fn text(status: u16, body: &str) -> Outgoing {
         status,
         content_type: "text/plain; charset=utf-8",
         cache: None,
+        file_name: None,
         body: body.as_bytes().to_vec(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample(name: &str, at: &str) -> Picture {
+        Picture {
+            id: 1,
+            path: PathBuf::from(name),
+            captured_at: DateTime::parse_from_rfc3339(at).unwrap().with_timezone(&Utc),
+            name: name.to_string(),
+            latitude: None,
+            longitude: None,
+            place: None,
+        }
+    }
+
+    fn state_with(root: PathBuf, pictures: Vec<Picture>) -> AppState {
+        AppState {
+            inner: Arc::new(Inner {
+                library_root: root,
+                host_label: String::new(),
+                catalog: None,
+                library: Mutex::new(Library {
+                    label: None,
+                    scanned_at: None,
+                    pictures,
+                }),
+            }),
+        }
+    }
+
+    #[test]
+    fn lists_every_picture_name() {
+        let state = state_with(
+            PathBuf::from("/tmp"),
+            vec![
+                sample("early.jpg", "2006-07-22T00:05:07Z"),
+                sample("later.jpg", "2012-12-06T15:46:01Z"),
+            ],
+        );
+        let response = picture_names(&state, "");
+        assert_eq!(response.status, 200);
+        assert_eq!(String::from_utf8(response.body).unwrap(), "[\"early.jpg\",\"later.jpg\"]");
+    }
+
+    #[test]
+    fn lists_names_inside_a_date_range() {
+        let state = state_with(
+            PathBuf::from("/tmp"),
+            vec![
+                sample("early.jpg", "2006-07-22T00:05:07Z"),
+                sample("kept.jpg", "2012-12-06T15:46:01Z"),
+                sample("later.jpg", "2014-03-22T18:04:05Z"),
+            ],
+        );
+        let response = picture_names(&state, "from=2012-01-01&to=2012-12-06");
+        assert_eq!(response.status, 200);
+        assert_eq!(String::from_utf8(response.body).unwrap(), "[\"kept.jpg\"]");
+    }
+
+    #[test]
+    fn rejects_a_reversed_date_range() {
+        let state = state_with(PathBuf::from("/tmp"), Vec::new());
+        let response = picture_names(&state, "from=2014-01-01&to=2012-01-01");
+        assert_eq!(response.status, 400);
+    }
+
+    #[test]
+    fn downloads_one_named_picture() {
+        let root = std::env::temp_dir().join(format!("timeline-download-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("kept.jpg");
+        std::fs::write(&file, b"jpeg-bytes").unwrap();
+        let mut picture = sample("kept.jpg", "2012-12-06T15:46:01Z");
+        picture.path = file;
+        let state = state_with(root.clone(), vec![picture, sample("other.jpg", "2014-03-22T18:04:05Z")]);
+        let response = picture_download(&state, "name=kept.jpg");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.content_type, "image/jpeg");
+        assert_eq!(response.body, b"jpeg-bytes");
+        assert_eq!(response.file_name.as_deref(), Some("kept.jpg"));
+        let missing = picture_download(&state, "name=missing.jpg");
+        assert_eq!(missing.status, 404);
+        let unnamed = picture_download(&state, "");
+        assert_eq!(unnamed.status, 400);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn refuses_a_name_shared_by_two_pictures() {
+        let state = state_with(
+            PathBuf::from("/tmp"),
+            vec![
+                sample("same.jpg", "2012-12-06T15:46:01Z"),
+                sample("same.jpg", "2014-03-22T18:04:05Z"),
+            ],
+        );
+        let response = picture_download(&state, "name=same.jpg");
+        assert_eq!(response.status, 400);
     }
 }

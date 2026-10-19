@@ -1,4 +1,4 @@
-use std::fs;
+use std::fs::{self, File};
 use std::path::Path;
 
 pub fn content_type_for(path: &Path) -> &'static str {
@@ -17,8 +17,22 @@ pub fn content_type_for(path: &Path) -> &'static str {
         "heif" => "image/heif",
         "avif" => "image/avif",
         "tif" | "tiff" => "image/tiff",
+        "mp4" | "m4v" => "video/mp4",
+        "mov" => "video/quicktime",
+        "webm" => "video/webm",
         _ => "application/octet-stream",
     }
+}
+
+pub fn open_inside(root: &Path, stored: &Path) -> Option<(File, u64, &'static str)> {
+    let root = root.canonicalize().ok()?;
+    let file_path = stored.canonicalize().ok()?;
+    if !file_path.is_file() || !file_path.starts_with(&root) {
+        return None;
+    }
+    let file = File::open(&file_path).ok()?;
+    let len = file.metadata().ok()?.len();
+    Some((file, len, content_type_for(&file_path)))
 }
 
 pub fn read_picture(root: &Path, stored: &Path) -> Option<(Vec<u8>, &'static str)> {
@@ -65,6 +79,10 @@ mod tests {
         assert_eq!(content_type_for(Path::new("a.JPG")), "image/jpeg");
         assert_eq!(content_type_for(Path::new("phone.HEIC")), "image/heic");
         assert_eq!(content_type_for(Path::new("mark.png")), "image/png");
+        assert_eq!(content_type_for(Path::new("clip.MP4")), "video/mp4");
+        assert_eq!(content_type_for(Path::new("clip.m4v")), "video/mp4");
+        assert_eq!(content_type_for(Path::new("clip.mov")), "video/quicktime");
+        assert_eq!(content_type_for(Path::new("clip.webm")), "video/webm");
     }
 
     #[test]

@@ -233,7 +233,8 @@ h1 {
   line-height: 0;
 }
 
-.frame img {
+.frame img,
+.frame video {
   width: calc(46vh / (1 + var(--distance) * 1.15));
   height: calc(46vh / (1 + var(--distance) * 1.15));
   max-width: calc(68vw / (1 + var(--distance) * 1.15));
@@ -284,7 +285,16 @@ h1 {
   animation: rainbow-spin 24s linear infinite;
 }
 
-.frame[aria-current="true"] img {
+.frame video {
+  pointer-events: none;
+}
+
+.frame[aria-current="true"] video {
+  pointer-events: auto;
+}
+
+.frame[aria-current="true"] img,
+.frame[aria-current="true"] video {
   position: relative;
   z-index: 1;
   border-color: #0e0d14;

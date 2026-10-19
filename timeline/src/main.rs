@@ -1224,4 +1224,147 @@ mod tests {
         assert!(message.ends_with("2345"));
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    fn video_library(name: &str, bytes: &[u8]) -> (AppState, PathBuf) {
+        let root = std::env::temp_dir().join(format!("timeline-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join(name);
+        std::fs::write(&file, bytes).unwrap();
+        let mut still = sample("still.png", "2006-07-22T00:05:07Z");
+        still.id = 1;
+        let mut clip = sample(name, "2012-12-06T15:46:01Z");
+        clip.id = 2;
+        clip.path = file;
+        let state = state_with(root.clone(), vec![still, clip]);
+        (state, root)
+    }
+
+    #[test]
+    fn get_marks_a_video_in_the_picture_list() {
+        let response = get(
+            &state_with(
+                PathBuf::from("/tmp"),
+                vec![
+                    sample("still.png", "2006-07-22T00:05:07Z"),
+                    sample("clip.mp4", "2012-12-06T15:46:01Z"),
+                ],
+            ),
+            "/api/pictures",
+            "",
+        );
+        assert_eq!(response.status, 200);
+        let text = body(response);
+        assert!(text.contains("\"name\":\"clip.mp4\""));
+        assert!(text.contains("\"video\":true"));
+        assert!(text.contains("\"name\":\"still.png\""));
+        assert!(text.contains("\"video\":false"));
+    }
+
+    #[test]
+    fn get_lists_a_video_name_inside_its_date() {
+        let state = state_with(
+            PathBuf::from("/tmp"),
+            vec![
+                sample("still.png", "2006-07-22T00:05:07Z"),
+                sample("clip.mp4", "2012-12-06T15:46:01Z"),
+            ],
+        );
+        let names = get(&state, "/api/pictures/names", "");
+        assert_eq!(body(names), "[\"still.png\",\"clip.mp4\"]");
+        let ranged = get(&state, "/api/pictures/names", "from=2012-12-06&to=2012-12-06");
+        assert_eq!(body(ranged), "[\"clip.mp4\"]");
+    }
+
+    #[test]
+    fn get_serves_a_whole_video() {
+        let (state, root) = video_library("whole.mp4", b"0123456789");
+        let mut response = get(&state, "/api/pictures/2/file", "");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.content_type, "video/mp4");
+        assert!(response.accept_ranges);
+        assert!(response.content_range.is_none());
+        let message = response_head(&mut response);
+        assert!(message.contains("Accept-Ranges: bytes"));
+        assert!(message.ends_with("0123456789"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn get_serves_the_tail_of_a_video() {
+        let (state, root) = video_library("tail.mp4", b"0123456789");
+        let mut response = route(
+            state,
+            Incoming {
+                method: "GET".to_string(),
+                path: "/api/pictures/2/file".to_string(),
+                query: String::new(),
+                range: Some(ByteRange { start: 6, end: None }),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 206);
+        assert_eq!(response.content_range.as_deref(), Some("bytes 6-9/10"));
+        let message = response_head(&mut response);
+        assert!(message.ends_with("6789"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn get_refuses_a_video_range_past_the_end() {
+        let (state, root) = video_library("past.mp4", b"0123456789");
+        let response = route(
+            state,
+            Incoming {
+                method: "GET".to_string(),
+                path: "/api/pictures/2/file".to_string(),
+                query: String::new(),
+                range: Some(ByteRange { start: 50, end: None }),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 416);
+        assert_eq!(response.content_range.as_deref(), Some("bytes */10"));
+        assert!(response.accept_ranges);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn get_downloads_one_named_video() {
+        let (state, root) = video_library("clip.mp4", b"0123456789");
+        let mut response = get(&state, "/api/pictures/file", "name=clip.mp4");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.content_type, "video/mp4");
+        assert_eq!(response.file_name.as_deref(), Some("clip.mp4"));
+        let message = response_head(&mut response);
+        assert!(message.contains("Content-Disposition: attachment; filename=\"clip.mp4\""));
+        assert!(message.ends_with("0123456789"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn get_does_not_slice_a_picture() {
+        let root = std::env::temp_dir().join(format!("timeline-still-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("still.png");
+        std::fs::write(&file, b"still-bytes").unwrap();
+        let mut picture = sample("still.png", "2006-07-22T00:05:07Z");
+        picture.path = file;
+        let state = state_with(root.clone(), vec![picture]);
+        let response = route(
+            state,
+            Incoming {
+                method: "GET".to_string(),
+                path: "/api/pictures/1/file".to_string(),
+                query: String::new(),
+                range: Some(ByteRange { start: 0, end: Some(2) }),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 200);
+        assert_eq!(response.content_type, "image/png");
+        assert!(!response.accept_ranges);
+        assert!(response.content_range.is_none());
+        assert_eq!(response.body, b"still-bytes");
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

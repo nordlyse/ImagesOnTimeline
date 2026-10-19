@@ -831,6 +831,46 @@ mod tests {
     }
 
     #[test]
+    fn lays_a_webm_out_by_its_file_time() {
+        let root = std::env::temp_dir().join(format!("timeline-webm-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("clip.webm"), b"webm").unwrap();
+        fs::write(root.join("still.png"), b"still").unwrap();
+        filetime::set_file_mtime(root.join("clip.webm"), filetime::FileTime::from_unix_time(8_000, 0)).unwrap();
+        filetime::set_file_mtime(root.join("still.png"), filetime::FileTime::from_unix_time(1_000, 0)).unwrap();
+        let pictures = scan_folder(&root, &HashMap::new());
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(pictures.len(), 2);
+        assert_eq!(pictures[1].name, "clip.webm");
+        assert!(is_video(Path::new("clip.webm")));
+        assert!(!is_video(Path::new("still.png")));
+        assert_eq!(pictures[1].captured_at.timestamp(), 8_000);
+    }
+
+    #[test]
+    fn reads_a_64_bit_quicktime_date() {
+        let root = std::env::temp_dir().join(format!("timeline-mov-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let unix = 1_500_000_000i64;
+        let qt = (unix + 2_082_844_800) as u64;
+        let mut clip = vec![0u8; 4];
+        clip.extend_from_slice(&48u32.to_be_bytes());
+        clip.extend_from_slice(b"mvhd");
+        clip.push(1);
+        clip.extend_from_slice(&[0, 0, 0]);
+        clip.extend_from_slice(&qt.to_be_bytes());
+        fs::write(root.join("clip.mov"), &clip).unwrap();
+        let pictures = scan_folder(&root, &HashMap::new());
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(pictures.len(), 1);
+        assert_eq!(pictures[0].name, "clip.mov");
+        assert!(is_video(Path::new("clip.MOV")));
+        assert_eq!(pictures[0].captured_at.timestamp(), unix);
+    }
+
+    #[test]
     fn reads_coordinates_from_a_gps_directory() {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(b"II");

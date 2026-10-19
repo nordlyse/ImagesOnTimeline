@@ -80,6 +80,8 @@ mod tests {
         assert_eq!(content_type_for(Path::new("phone.HEIC")), "image/heic");
         assert_eq!(content_type_for(Path::new("mark.png")), "image/png");
         assert_eq!(content_type_for(Path::new("clip.MP4")), "video/mp4");
+        assert_eq!(content_type_for(Path::new("clip.m4v")), "video/mp4");
+        assert_eq!(content_type_for(Path::new("clip.mov")), "video/quicktime");
         assert_eq!(content_type_for(Path::new("clip.webm")), "video/webm");
     }
 

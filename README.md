@@ -54,7 +54,7 @@ Each picture is placed by its capture time. JPEG, PNG, and TIFF dates are read f
 
 The scan stores that record in GreptimeDB: the file name, the capture time, and the place or coordinates when they are present. It also stores a folder record with the scan time and the picture count. When the page opens again, the latest stored folder is shown and its files are not read again. Choosing another folder that already has a stored scan opens that scan directly. A folder with no stored scan is read once, and that scan is kept. Scan new reads a stored folder again, keeps the pictures that are still there, stores new ones, and updates the scan time.
 
-Supported pictures are JPEG, PNG, GIF, WebP, BMP, TIFF, HEIC, HEIF, and AVIF. A phone photo stored as HEIC or HEIF is sent as JPEG, because most browsers do not draw HEIC.
+Supported pictures are JPEG, PNG, GIF, WebP, BMP, TIFF, HEIC, HEIF, and AVIF. A phone photo stored as HEIC or HEIF is sent as JPEG, because most browsers do not draw HEIC. MP4, M4V, MOV, and WebM videos are laid on the same timeline. The current video can be watched there. A stored folder picks up new videos when Scan new is used.
 
 ## Picture names
 

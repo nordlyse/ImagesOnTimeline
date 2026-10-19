@@ -33,6 +33,10 @@ pub fn is_image(path: &Path) -> bool {
     )
 }
 
+pub fn is_video(path: &Path) -> bool {
+    matches!(extension(path).as_str(), "mp4" | "m4v" | "mov" | "webm")
+}
+
 pub fn scan_folder(folder: &Path, known: &HashMap<String, StoredPicture>) -> Vec<Picture> {
     eprintln!("scanning {}", folder.display());
     let mut pictures = Vec::new();
@@ -67,7 +71,7 @@ pub fn scan_folder(folder: &Path, known: &HashMap<String, StoredPicture>) -> Vec
                 pending.push(path);
                 continue;
             }
-            if !is_image(&path) {
+            if !is_image(&path) && !is_video(&path) {
                 continue;
             }
             let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
@@ -155,6 +159,10 @@ fn picture_meta(path: &Path) -> PictureMeta {
         "jpg" | "jpeg" => meta_from_bytes(&read_prefix(path, 262_144).unwrap_or_default(), true),
         "png" | "tif" | "tiff" => meta_from_bytes(&read_prefix(path, 262_144).unwrap_or_default(), false),
         "heic" | "heif" | "avif" => bounded_meta(path),
+        "mp4" | "m4v" | "mov" => PictureMeta {
+            captured_at: quicktime_captured_at(path),
+            ..PictureMeta::default()
+        },
         _ => PictureMeta::default(),
     }
 }
@@ -646,6 +654,54 @@ fn parse_exif_text(text: &str) -> Option<DateTime<Utc>> {
         .map(|when| when.and_utc())
 }
 
+fn quicktime_captured_at(path: &Path) -> Option<DateTime<Utc>> {
+    const WINDOW: u64 = 1024 * 1024;
+    let mut file = File::open(path).ok()?;
+    let length = file.metadata().ok()?.len();
+    if length == 0 {
+        return None;
+    }
+    let head_len = usize::try_from(length.min(WINDOW)).unwrap_or(0);
+    let mut head = vec![0; head_len];
+    file.read_exact(&mut head).ok()?;
+    if let Some(unix) = quicktime_unix(&head) {
+        return DateTime::from_timestamp(unix, 0);
+    }
+    if length <= WINDOW {
+        return None;
+    }
+    let tail_len = usize::try_from(WINDOW.min(length.saturating_sub(WINDOW))).unwrap_or(0);
+    if file.seek(SeekFrom::End(-(tail_len as i64))).is_err() {
+        return None;
+    }
+    let mut tail = vec![0; tail_len];
+    file.read_exact(&mut tail).ok()?;
+    DateTime::from_timestamp(quicktime_unix(&tail)?, 0)
+}
+
+fn quicktime_unix(bytes: &[u8]) -> Option<i64> {
+    const MAC_EPOCH: i64 = 2_082_844_800;
+    let mut start = 0;
+    while let Some(rel) = bytes[start..].windows(4).position(|window| window == b"mvhd") {
+        let at = start + rel;
+        let version = *bytes.get(at + 4)?;
+        let qt = if version == 0 {
+            u32::from_be_bytes(bytes.get(at + 8..at + 12)?.try_into().ok()?) as i64
+        } else if version == 1 {
+            i64::try_from(u64::from_be_bytes(bytes.get(at + 8..at + 16)?.try_into().ok()?)).ok()?
+        } else {
+            start = at + 4;
+            continue;
+        };
+        let unix = qt.checked_sub(MAC_EPOCH)?;
+        if (0..4_102_444_800).contains(&unix) {
+            return Some(unix);
+        }
+        start = at + 4;
+    }
+    None
+}
+
 fn extension(path: &Path) -> String {
     path.extension()
         .and_then(|extension| extension.to_str())
@@ -746,6 +802,32 @@ mod tests {
         assert_eq!(pictures[0].captured_at, stored_at);
         assert_eq!(pictures[0].latitude, Some(41.0));
         assert_eq!(pictures[0].place.as_deref(), Some("Istanbul"));
+    }
+
+    #[test]
+    fn lays_a_video_out_by_its_quicktime_date() {
+        let root = std::env::temp_dir().join(format!("timeline-video-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let unix = 1_400_000_000i64;
+        let qt = (unix + 2_082_844_800) as u32;
+        let mut clip = vec![0u8; 8];
+        clip.extend_from_slice(&32u32.to_be_bytes());
+        clip.extend_from_slice(b"mvhd");
+        clip.push(0);
+        clip.extend_from_slice(&[0, 0, 0]);
+        clip.extend_from_slice(&qt.to_be_bytes());
+        fs::write(root.join("clip.mp4"), &clip).unwrap();
+        fs::write(root.join("still.png"), b"still").unwrap();
+        filetime::set_file_mtime(root.join("clip.mp4"), filetime::FileTime::from_unix_time(5_000, 0)).unwrap();
+        filetime::set_file_mtime(root.join("still.png"), filetime::FileTime::from_unix_time(1_000, 0)).unwrap();
+        let pictures = scan_folder(&root, &HashMap::new());
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(pictures.len(), 2);
+        assert_eq!(pictures[1].name, "clip.mp4");
+        assert!(is_video(Path::new("clip.mp4")));
+        assert_eq!(pictures[1].captured_at.timestamp(), unix);
+        assert!(pictures[0].captured_at < pictures[1].captured_at);
     }
 
     #[test]

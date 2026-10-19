@@ -4,7 +4,7 @@ mod scan;
 mod store;
 
 use std::env;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -14,9 +14,9 @@ use std::time::Duration;
 
 use chrono::{DateTime, NaiveDate, NaiveTime, SecondsFormat, TimeZone, Utc};
 
-use crate::files::read_picture;
+use crate::files::{open_inside, read_picture};
 use crate::library::{display_label, list_folders, resolve_folder, FolderView};
-use crate::scan::{scan_folder, Picture};
+use crate::scan::{is_video, scan_folder, Picture};
 use crate::store::{fresh_pictures, Catalog, FolderScan, Session};
 
 const INDEX_HTML: &str = include_str!("../static/index.html");
@@ -52,7 +52,19 @@ struct Incoming {
     method: String,
     path: String,
     query: String,
+    range: Option<ByteRange>,
     body: Vec<u8>,
+}
+
+struct ByteRange {
+    start: u64,
+    end: Option<u64>,
+}
+
+struct FileSpan {
+    file: std::fs::File,
+    start: u64,
+    length: u64,
 }
 
 struct Outgoing {
@@ -60,6 +72,9 @@ struct Outgoing {
     content_type: &'static str,
     cache: Option<&'static str>,
     file_name: Option<String>,
+    accept_ranges: bool,
+    content_range: Option<String>,
+    span: Option<FileSpan>,
     body: Vec<u8>,
 }
 
@@ -114,11 +129,11 @@ fn serve(state: AppState, mut stream: TcpStream) -> Result<(), String> {
         .set_read_timeout(Some(Duration::from_secs(15)))
         .map_err(|err| err.to_string())?;
     stream
-        .set_write_timeout(Some(Duration::from_secs(60)))
+        .set_write_timeout(Some(Duration::from_secs(300)))
         .map_err(|err| err.to_string())?;
     let request = read_request(&mut stream)?;
-    let response = route(state, request);
-    write_response(&mut stream, &response)
+    let mut response = route(state, request);
+    write_response(&mut stream, &mut response)
 }
 
 fn route(state: AppState, request: Incoming) -> Outgoing {
@@ -147,7 +162,7 @@ fn route(state: AppState, request: Incoming) -> Outgoing {
         return picture_names(&state, &request.query);
     }
     if request.method == "GET" && request.path == "/api/pictures/file" {
-        return picture_download(&state, &request.query);
+        return picture_download(&state, &request.query, request.range);
     }
     if request.method == "GET" {
         if let Some(id) = request
@@ -156,7 +171,7 @@ fn route(state: AppState, request: Incoming) -> Outgoing {
             .and_then(|rest| rest.strip_suffix("/file"))
             .and_then(|id| id.parse::<i64>().ok())
         {
-            return picture_file(&state, id);
+            return picture_file(&state, id, request.range);
         }
     }
     text(404, "Not found.")
@@ -247,13 +262,14 @@ fn picture_list(state: &AppState) -> Outgoing {
         }
         let captured_at = picture.captured_at.to_rfc3339_opts(SecondsFormat::Secs, true);
         body.push_str(&format!(
-            "{{\"id\":{},\"captured_at\":{},\"name\":{},\"latitude\":{},\"longitude\":{},\"place\":{}}}",
+            "{{\"id\":{},\"captured_at\":{},\"name\":{},\"latitude\":{},\"longitude\":{},\"place\":{},\"video\":{}}}",
             picture.id,
             json_string(&captured_at),
             json_string(&picture.name),
             json_number(picture.latitude),
             json_number(picture.longitude),
-            json_optional(picture.place.as_deref())
+            json_optional(picture.place.as_deref()),
+            if is_video(&picture.path) { "true" } else { "false" }
         ));
     }
     body.push(']');
@@ -294,7 +310,7 @@ fn picture_names(state: &AppState, query: &str) -> Outgoing {
     json(200, body)
 }
 
-fn picture_download(state: &AppState, query: &str) -> Outgoing {
+fn picture_download(state: &AppState, query: &str, range: Option<ByteRange>) -> Outgoing {
     let name = query_value(query, "name");
     let name = name.trim();
     if name.is_empty() {
@@ -318,16 +334,7 @@ fn picture_download(state: &AppState, query: &str) -> Outgoing {
         }
         path
     };
-    match read_picture(&state.inner.library_root, &stored) {
-        Some((bytes, content_type)) => Outgoing {
-            status: 200,
-            content_type,
-            cache: Some("private, max-age=3600"),
-            file_name: Some(download_name(name, content_type)),
-            body: bytes,
-        },
-        None => text(404, "That picture was not found."),
-    }
+    send_library_file(&state.inner.library_root, &stored, range, Some(name.to_string()))
 }
 
 fn in_range(captured_at: DateTime<Utc>, from: Option<DateTime<Utc>>, to: Option<DateTime<Utc>>) -> bool {
@@ -377,7 +384,7 @@ fn download_name(name: &str, content_type: &str) -> String {
     name.to_string()
 }
 
-fn picture_file(state: &AppState, id: i64) -> Outgoing {
+fn picture_file(state: &AppState, id: i64, range: Option<ByteRange>) -> Outgoing {
     let stored = {
         let library = match state.inner.library.lock() {
             Ok(library) => library,
@@ -392,16 +399,78 @@ fn picture_file(state: &AppState, id: i64) -> Outgoing {
     let Some(stored) = stored else {
         return text(404, "That picture was not found.");
     };
-    match read_picture(&state.inner.library_root, &stored) {
+    send_library_file(&state.inner.library_root, &stored, range, None)
+}
+
+fn send_library_file(root: &Path, stored: &Path, range: Option<ByteRange>, name: Option<String>) -> Outgoing {
+    if is_video(stored) {
+        return send_video(root, stored, range, name);
+    }
+    match read_picture(root, stored) {
         Some((bytes, content_type)) => Outgoing {
             status: 200,
             content_type,
             cache: Some("private, max-age=3600"),
-            file_name: None,
+            file_name: name.map(|name| download_name(&name, content_type)),
+            accept_ranges: false,
+            content_range: None,
+            span: None,
             body: bytes,
         },
         None => text(404, "That picture was not found."),
     }
+}
+
+fn send_video(root: &Path, stored: &Path, range: Option<ByteRange>, file_name: Option<String>) -> Outgoing {
+    let Some((file, total, content_type)) = open_inside(root, stored) else {
+        return text(404, "That picture was not found.");
+    };
+    let sliced = match slice_range(total, range) {
+        Ok(bounds) => bounds,
+        Err(()) => {
+            return Outgoing {
+                status: 416,
+                content_type: "text/plain; charset=utf-8",
+                cache: None,
+                file_name: None,
+                accept_ranges: true,
+                content_range: Some(format!("bytes */{total}")),
+                span: None,
+                body: b"That range is outside the video.".to_vec(),
+            };
+        }
+    };
+    let (status, start, length, content_range) = match sliced {
+        None => (200, 0, total, None),
+        Some((start, end)) => {
+            let length = end - start + 1;
+            (206, start, length, Some(format!("bytes {start}-{end}/{total}")))
+        }
+    };
+    Outgoing {
+        status,
+        content_type,
+        cache: Some("private, max-age=3600"),
+        file_name,
+        accept_ranges: true,
+        content_range,
+        span: Some(FileSpan { file, start, length }),
+        body: Vec::new(),
+    }
+}
+
+fn slice_range(total: u64, range: Option<ByteRange>) -> Result<Option<(u64, u64)>, ()> {
+    let Some(range) = range else {
+        return Ok(None);
+    };
+    if total == 0 || range.start >= total {
+        return Err(());
+    }
+    let end = range.end.unwrap_or(total - 1).min(total - 1);
+    if end < range.start {
+        return Err(());
+    }
+    Ok(Some((range.start, end)))
 }
 
 fn scan_chosen(
@@ -687,8 +756,29 @@ fn read_request(stream: &mut TcpStream) -> Result<Incoming, String> {
         method,
         path,
         query,
+        range: byte_range(&head),
         body,
     })
+}
+
+fn byte_range(head: &str) -> Option<ByteRange> {
+    for line in head.lines() {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if !name.eq_ignore_ascii_case("range") {
+            continue;
+        }
+        let rest = value.trim().strip_prefix("bytes=")?;
+        if rest.contains(',') {
+            return None;
+        }
+        let (start, end) = rest.split_once('-')?;
+        let start = start.parse().ok()?;
+        let end = if end.is_empty() { None } else { Some(end.parse().ok()?) };
+        return Some(ByteRange { start, end });
+    }
+    None
 }
 
 fn find_header_end(buffer: &[u8]) -> Option<usize> {
@@ -707,22 +797,31 @@ fn content_length(head: &str) -> usize {
     0
 }
 
-fn write_response(stream: &mut TcpStream, response: &Outgoing) -> Result<(), String> {
+fn write_response(stream: &mut TcpStream, response: &mut Outgoing) -> Result<(), String> {
     let reason = match response.status {
         200 => "OK",
+        206 => "Partial Content",
         400 => "Bad Request",
         404 => "Not Found",
+        416 => "Range Not Satisfiable",
         _ => "Internal Server Error",
     };
+    let length = response.span.as_ref().map(|span| span.length).unwrap_or(response.body.len() as u64);
     let mut head = format!(
-        "HTTP/1.1 {} {reason}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n",
-        response.status,
-        response.content_type,
-        response.body.len()
+        "HTTP/1.1 {} {reason}\r\nContent-Type: {}\r\nContent-Length: {length}\r\nConnection: close\r\n",
+        response.status, response.content_type
     );
     if let Some(cache) = response.cache {
         head.push_str("Cache-Control: ");
         head.push_str(cache);
+        head.push_str("\r\n");
+    }
+    if response.accept_ranges {
+        head.push_str("Accept-Ranges: bytes\r\n");
+    }
+    if let Some(range) = &response.content_range {
+        head.push_str("Content-Range: ");
+        head.push_str(range);
         head.push_str("\r\n");
     }
     if let Some(name) = &response.file_name {
@@ -732,7 +831,22 @@ fn write_response(stream: &mut TcpStream, response: &Outgoing) -> Result<(), Str
     }
     head.push_str("\r\n");
     stream.write_all(head.as_bytes()).map_err(|err| err.to_string())?;
-    stream.write_all(&response.body).map_err(|err| err.to_string())?;
+    if let Some(span) = response.span.as_mut() {
+        span.file.seek(SeekFrom::Start(span.start)).map_err(|err| err.to_string())?;
+        let mut left = span.length;
+        let mut buf = [0u8; 65536];
+        while left > 0 {
+            let chunk = usize::try_from(left.min(buf.len() as u64)).unwrap_or(buf.len());
+            let read = span.file.read(&mut buf[..chunk]).map_err(|err| err.to_string())?;
+            if read == 0 {
+                break;
+            }
+            stream.write_all(&buf[..read]).map_err(|err| err.to_string())?;
+            left -= read as u64;
+        }
+    } else {
+        stream.write_all(&response.body).map_err(|err| err.to_string())?;
+    }
     Ok(())
 }
 
@@ -874,6 +988,9 @@ fn page(body: &'static str, content_type: &'static str) -> Outgoing {
         content_type,
         cache: Some("no-cache"),
         file_name: None,
+        accept_ranges: false,
+        content_range: None,
+        span: None,
         body: body.as_bytes().to_vec(),
     }
 }
@@ -884,6 +1001,9 @@ fn json(status: u16, body: String) -> Outgoing {
         content_type: "application/json",
         cache: None,
         file_name: None,
+        accept_ranges: false,
+        content_range: None,
+        span: None,
         body: body.into_bytes(),
     }
 }
@@ -894,6 +1014,9 @@ fn text(status: u16, body: &str) -> Outgoing {
         content_type: "text/plain; charset=utf-8",
         cache: None,
         file_name: None,
+        accept_ranges: false,
+        content_range: None,
+        span: None,
         body: body.as_bytes().to_vec(),
     }
 }
@@ -947,6 +1070,7 @@ mod tests {
                 method: "GET".to_string(),
                 path: path.to_string(),
                 query: query.to_string(),
+                range: None,
                 body: Vec::new(),
             },
         )
@@ -1007,6 +1131,7 @@ mod tests {
                 method: "POST".to_string(),
                 path: "/api/pictures/names".to_string(),
                 query: String::new(),
+                range: None,
                 body: Vec::new(),
             },
         );
@@ -1027,7 +1152,8 @@ mod tests {
         assert_eq!(response.content_type, "image/jpeg");
         assert_eq!(response.body, b"jpeg-bytes");
         assert_eq!(response.file_name.as_deref(), Some("my photo.jpg"));
-        let head = response_head(&response_copy(&state));
+        let mut copied = response_copy(&state);
+        let head = response_head(&mut copied);
         assert!(head.contains("Content-Disposition: attachment; filename=\"my photo.jpg\""));
         let missing = get(&state, "/api/pictures/file", "name=missing.jpg");
         assert_eq!(missing.status, 404);
@@ -1040,7 +1166,7 @@ mod tests {
         get(state, "/api/pictures/file", "name=my%20photo.jpg")
     }
 
-    fn response_head(response: &Outgoing) -> String {
+    fn response_head(response: &mut Outgoing) -> String {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let client = std::thread::spawn(move || {
@@ -1067,5 +1193,35 @@ mod tests {
         let response = get(&state, "/api/pictures/file", "name=same.jpg");
         assert_eq!(response.status, 400);
         assert_eq!(body(response), "More than one picture has that name.");
+    }
+
+    #[test]
+    fn get_serves_a_video_in_a_byte_range() {
+        let root = std::env::temp_dir().join(format!("timeline-video-range-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("clip.mp4");
+        std::fs::write(&file, b"0123456789").unwrap();
+        let mut picture = sample("clip.mp4", "2012-12-06T15:46:01Z");
+        picture.path = file;
+        let state = state_with(root.clone(), vec![picture]);
+        let mut response = route(
+            state,
+            Incoming {
+                method: "GET".to_string(),
+                path: "/api/pictures/1/file".to_string(),
+                query: String::new(),
+                range: Some(ByteRange { start: 2, end: Some(5) }),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 206);
+        assert_eq!(response.content_type, "video/mp4");
+        assert!(response.accept_ranges);
+        assert_eq!(response.content_range.as_deref(), Some("bytes 2-5/10"));
+        let message = response_head(&mut response);
+        assert!(message.contains("HTTP/1.1 206 Partial Content"));
+        assert!(message.contains("Accept-Ranges: bytes"));
+        assert!(message.ends_with("2345"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

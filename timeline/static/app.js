@@ -21,7 +21,7 @@ document.querySelector("#step-forward").addEventListener("click", () => step(1))
 scrub.addEventListener("input", () => select(Number(scrub.value)));
 
 stage.addEventListener("pointerdown", (event) => {
-  if (event.button !== 0 || event.target.closest("button, input, a")) return;
+  if (event.button !== 0 || event.target.closest("button, input, a, video")) return;
   drag = { x: event.clientX, index };
   stage.setPointerCapture(event.pointerId);
 });
@@ -92,8 +92,8 @@ function paint() {
   if (pictures.length === 0) {
     empty.hidden = false;
     empty.textContent = scannedAt
-      ? "This folder has no pictures."
-      : "Choose a folder to lay its pictures out on the timeline.";
+      ? "This folder has no pictures or videos."
+      : "Choose a folder to lay its pictures and videos out on the timeline.";
     dateText.textContent = "";
     datePlace.textContent = "";
     datePlace.hidden = true;
@@ -109,27 +109,25 @@ function paint() {
   for (let position = start; position <= end; position += 1) {
     const picture = pictures[position];
     const distance = Math.abs(position - index);
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "frame";
-    button.style.setProperty("--distance", String(distance));
-    if (position === index) button.setAttribute("aria-current", "true");
-    button.setAttribute("aria-label", pictureLabel(picture));
-    const image = document.createElement("img");
-    image.alt = "";
-    image.addEventListener("load", alignStrip);
-    image.src = `/api/pictures/${picture.id}/file`;
+    const current = position === index;
+    const frame = document.createElement(current && picture.video ? "div" : "button");
+    if (frame.tagName === "BUTTON") frame.type = "button";
+    frame.className = "frame";
+    frame.style.setProperty("--distance", String(distance));
+    if (current) frame.setAttribute("aria-current", "true");
+    frame.setAttribute("aria-label", pictureLabel(picture));
+    const media = mediaElement(picture, current);
     const shot = document.createElement("div");
     shot.className = "shot";
-    if (position === index) {
+    if (current) {
       shot.append(rainbowLayer("rainbow-glow"), rainbowLayer("rainbow-ring"));
     }
-    shot.append(image);
+    shot.append(media);
     const caption = document.createElement("span");
     caption.textContent = formatDay(picture.captured_at);
-    button.append(shot, caption);
-    button.addEventListener("click", () => select(position));
-    strip.append(button);
+    frame.append(shot, caption);
+    if (frame.tagName === "BUTTON") frame.addEventListener("click", () => select(position));
+    strip.append(frame);
   }
   scrub.max = String(pictures.length - 1);
   scrub.value = String(index);
@@ -137,6 +135,25 @@ function paint() {
   dateStart.textContent = formatDay(pictures[0].captured_at);
   dateEnd.textContent = formatDay(pictures[pictures.length - 1].captured_at);
   requestAnimationFrame(alignStrip);
+}
+
+function mediaElement(picture, current) {
+  if (!picture.video) {
+    const image = document.createElement("img");
+    image.alt = "";
+    image.addEventListener("load", alignStrip);
+    image.src = `/api/pictures/${picture.id}/file`;
+    return image;
+  }
+  const video = document.createElement("video");
+  video.muted = true;
+  video.playsInline = true;
+  video.preload = current ? "auto" : "metadata";
+  video.controls = current;
+  if (current) video.autoplay = true;
+  video.addEventListener("loadedmetadata", alignStrip);
+  video.src = `/api/pictures/${picture.id}/file`;
+  return video;
 }
 
 function rainbowLayer(className) {

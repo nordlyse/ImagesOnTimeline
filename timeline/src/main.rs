@@ -16,7 +16,7 @@ use chrono::{DateTime, NaiveDate, NaiveTime, SecondsFormat, TimeZone, Utc};
 
 use crate::files::{open_inside, read_picture};
 use crate::library::{display_label, list_folders, resolve_folder, FolderView};
-use crate::scan::{is_video, scan_folder, Picture};
+use crate::scan::{is_video, omit_removed, scan_folder, Picture};
 use crate::store::{fresh_pictures, Catalog, FolderScan, Session};
 
 const INDEX_HTML: &str = include_str!("../static/index.html");
@@ -36,12 +36,14 @@ struct Inner {
 }
 
 struct Library {
+    folder: Option<String>,
     label: Option<String>,
     scanned_at: Option<DateTime<Utc>>,
     pictures: Vec<Picture>,
 }
 
 struct ScannedFolder {
+    folder: String,
     label: String,
     scanned_at: DateTime<Utc>,
     reused: bool,
@@ -164,6 +166,18 @@ fn route(state: AppState, request: Incoming) -> Outgoing {
     if request.method == "GET" && request.path == "/api/pictures/file" {
         return picture_download(&state, &request.query, request.range);
     }
+    if request.method == "DELETE" && request.path == "/api/pictures/file" {
+        return picture_remove_named(&state, &request.query);
+    }
+    if request.method == "DELETE" {
+        if let Some(id) = request
+            .path
+            .strip_prefix("/api/pictures/")
+            .and_then(|id| id.parse::<i64>().ok())
+        {
+            return picture_remove(&state, id);
+        }
+    }
     if request.method == "GET" {
         if let Some(id) = request
             .path
@@ -236,6 +250,7 @@ fn choose_library(state: &AppState, body: &[u8]) -> Outgoing {
     let files = scanned.pictures.len();
     let label = scanned.label;
     let scanned_at = scanned.scanned_at.to_rfc3339_opts(SecondsFormat::Secs, true);
+    library.folder = Some(scanned.folder);
     library.label = Some(label.clone());
     library.scanned_at = Some(scanned.scanned_at);
     library.pictures = scanned.pictures;
@@ -335,6 +350,63 @@ fn picture_download(state: &AppState, query: &str, range: Option<ByteRange>) -> 
         path
     };
     send_library_file(&state.inner.library_root, &stored, range, Some(name.to_string()))
+}
+
+fn picture_remove_named(state: &AppState, query: &str) -> Outgoing {
+    let name = query_value(query, "name");
+    let name = name.trim();
+    if name.is_empty() {
+        return text(400, "Choose a picture name.");
+    }
+    let id = {
+        let library = match state.inner.library.lock() {
+            Ok(library) => library,
+            Err(_) => return text(500, "The picture query stopped."),
+        };
+        let mut matches = library.pictures.iter().filter(|picture| picture.name == name);
+        let Some(picture) = matches.next() else {
+            return text(404, "That picture was not found.");
+        };
+        if matches.next().is_some() {
+            return text(400, "More than one picture has that name.");
+        }
+        picture.id
+    };
+    picture_remove(state, id)
+}
+
+fn picture_remove(state: &AppState, id: i64) -> Outgoing {
+    let mut library = match state.inner.library.lock() {
+        Ok(library) => library,
+        Err(_) => return text(500, "The picture query stopped."),
+    };
+    let Some(index) = library.pictures.iter().position(|picture| picture.id == id) else {
+        return text(404, "That picture was not found.");
+    };
+    let name = library.pictures[index].name.clone();
+    let path = match library.pictures[index].path.to_str() {
+        Some(path) => path.to_string(),
+        None => return text(500, "The picture could not be removed."),
+    };
+    if let Some(catalog) = state.inner.catalog.as_ref() {
+        let Some(folder) = library.folder.clone() else {
+            return text(500, "The picture could not be removed.");
+        };
+        let Some(mut session) = open_catalog(catalog) else {
+            return text(500, "The picture could not be removed.");
+        };
+        if let Err(err) = session.remove_picture(&folder, &path) {
+            eprintln!("picture catalog remove stopped: {err}");
+            return text(500, "The picture could not be removed.");
+        }
+        let count = library.pictures.len().saturating_sub(1) as i64;
+        let scanned_at = library.scanned_at.unwrap_or_else(Utc::now);
+        if let Err(err) = session.save_picture_count(&folder, scanned_at, count) {
+            eprintln!("picture catalog count stopped: {err}");
+        }
+    }
+    library.pictures.remove(index);
+    json(200, format!("{{\"id\":{id},\"name\":{}}}", json_string(&name)))
 }
 
 fn in_range(captured_at: DateTime<Utc>, from: Option<DateTime<Utc>>, to: Option<DateTime<Utc>>) -> bool {
@@ -489,17 +561,22 @@ fn scan_chosen(
     let mut session = catalog.and_then(open_catalog);
     if !rescan {
         if let Some(session) = session.as_mut() {
-            if let Some(stored) = remembered_folder(session, &folder_key) {
-            eprintln!(
-                "opened stored folder {folder_key} with {} pictures",
-                stored.pictures.len()
-            );
-            return Ok(ScannedFolder {
-                label,
-                scanned_at: stored.scan.scanned_at,
-                reused: true,
-                pictures: stored.pictures,
-            });
+            if let Some(mut stored) = remembered_folder(session, &folder_key) {
+                match session.load_removed(&folder_key) {
+                    Ok(removed) => omit_removed(&mut stored.pictures, &removed),
+                    Err(err) => eprintln!("picture catalog removed read stopped: {err}"),
+                }
+                eprintln!(
+                    "opened stored folder {folder_key} with {} pictures",
+                    stored.pictures.len()
+                );
+                return Ok(ScannedFolder {
+                    folder: folder_key,
+                    label,
+                    scanned_at: stored.scan.scanned_at,
+                    reused: true,
+                    pictures: stored.pictures,
+                });
             }
         }
     }
@@ -513,7 +590,13 @@ fn scan_chosen(
         },
         None => std::collections::HashMap::new(),
     };
-    let pictures = scan_folder(&folder, &known);
+    let mut pictures = scan_folder(&folder, &known);
+    if let Some(session) = session.as_mut() {
+        match session.load_removed(&folder_key) {
+            Ok(removed) => omit_removed(&mut pictures, &removed),
+            Err(err) => eprintln!("picture catalog removed read stopped: {err}"),
+        }
+    }
     let scanned_at = Utc::now();
     if let Some(session) = session.as_mut() {
         let fresh = fresh_pictures(&pictures, &known);
@@ -547,6 +630,7 @@ fn scan_chosen(
         }
     }
     Ok(ScannedFolder {
+        folder: folder_key,
         label,
         scanned_at,
         reused: false,
@@ -568,10 +652,15 @@ fn recall_library(catalog: Option<&Catalog>, library_root: &Path, host_label: &s
             return empty_library();
         }
     };
-    let Some(stored) = stored else {
+    let Some(mut stored) = stored else {
         eprintln!("picture catalog has no stored folder");
         return empty_library();
     };
+    let folder = stored.scan.folder.clone();
+    match session.load_removed(&folder) {
+        Ok(removed) => omit_removed(&mut stored.pictures, &removed),
+        Err(err) => eprintln!("picture catalog removed read stopped: {err}"),
+    }
     let root = library_root
         .canonicalize()
         .unwrap_or_else(|_| library_root.to_path_buf());
@@ -582,6 +671,7 @@ fn recall_library(catalog: Option<&Catalog>, library_root: &Path, host_label: &s
         stored.pictures.len()
     );
     Library {
+        folder: Some(folder),
         label: Some(label),
         scanned_at: Some(stored.scan.scanned_at),
         pictures: stored.pictures,
@@ -684,6 +774,7 @@ fn open_catalog(catalog: &Catalog) -> Option<Session> {
 
 fn empty_library() -> Library {
     Library {
+        folder: None,
         label: None,
         scanned_at: None,
         pictures: Vec::new(),
@@ -1044,6 +1135,7 @@ mod tests {
                 host_label: String::new(),
                 catalog: None,
                 library: Mutex::new(Library {
+                    folder: None,
                     label: None,
                     scanned_at: None,
                     pictures,
@@ -1064,10 +1156,18 @@ mod tests {
     }
 
     fn get(state: &AppState, path: &str, query: &str) -> Outgoing {
+        call(state, "GET", path, query)
+    }
+
+    fn delete(state: &AppState, path: &str, query: &str) -> Outgoing {
+        call(state, "DELETE", path, query)
+    }
+
+    fn call(state: &AppState, method: &str, path: &str, query: &str) -> Outgoing {
         route(
             state.clone(),
             Incoming {
-                method: "GET".to_string(),
+                method: method.to_string(),
                 path: path.to_string(),
                 query: query.to_string(),
                 range: None,
@@ -1366,5 +1466,63 @@ mod tests {
         assert!(response.content_range.is_none());
         assert_eq!(response.body, b"still-bytes");
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn delete_removes_a_picture_and_leaves_the_file() {
+        let root = std::env::temp_dir().join(format!("timeline-remove-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("kept.jpg");
+        std::fs::write(&file, b"jpeg-bytes").unwrap();
+        let mut kept = sample("kept.jpg", "2012-12-06T15:46:01Z");
+        kept.id = 2;
+        kept.path = file.clone();
+        let mut early = sample("early.jpg", "2006-07-22T00:05:07Z");
+        early.id = 1;
+        let state = state_with(root.clone(), vec![early, kept]);
+        let response = delete(&state, "/api/pictures/2", "");
+        assert_eq!(response.status, 200);
+        assert_eq!(body(response), "{\"id\":2,\"name\":\"kept.jpg\"}");
+        assert_eq!(body(get(&state, "/api/pictures/names", "")), "[\"early.jpg\"]");
+        assert!(file.is_file());
+        assert_eq!(std::fs::read(&file).unwrap(), b"jpeg-bytes");
+        let missing = delete(&state, "/api/pictures/2", "");
+        assert_eq!(missing.status, 404);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn delete_removes_a_named_video_and_leaves_the_file() {
+        let (state, root) = video_library("drop.mp4", b"0123456789");
+        let file_route = delete(&state, "/api/pictures/2/file", "");
+        assert_eq!(file_route.status, 404);
+        let response = delete(&state, "/api/pictures/file", "name=drop.mp4");
+        assert_eq!(response.status, 200);
+        assert_eq!(body(response), "{\"id\":2,\"name\":\"drop.mp4\"}");
+        assert_eq!(body(get(&state, "/api/pictures/names", "")), "[\"still.png\"]");
+        let listed = body(get(&state, "/api/pictures", ""));
+        assert!(listed.contains("\"name\":\"still.png\""));
+        assert!(!listed.contains("drop.mp4"));
+        assert_eq!(std::fs::read(root.join("drop.mp4")).unwrap(), b"0123456789");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn delete_refuses_a_missing_or_shared_name() {
+        let state = state_with(
+            PathBuf::from("/tmp"),
+            vec![
+                sample("same.jpg", "2012-12-06T15:46:01Z"),
+                sample("same.jpg", "2014-03-22T18:04:05Z"),
+            ],
+        );
+        let shared = delete(&state, "/api/pictures/file", "name=same.jpg");
+        assert_eq!(shared.status, 400);
+        assert_eq!(body(shared), "More than one picture has that name.");
+        assert_eq!(body(get(&state, "/api/pictures/names", "")), "[\"same.jpg\",\"same.jpg\"]");
+        let missing = delete(&state, "/api/pictures/file", "name=missing.jpg");
+        assert_eq!(missing.status, 404);
+        let unnamed = delete(&state, "/api/pictures/file", "");
+        assert_eq!(unnamed.status, 400);
     }
 }

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -113,6 +113,17 @@ pub fn scan_folder(folder: &Path, known: &HashMap<String, StoredPicture>) -> Vec
     );
     arrange_pictures(&mut pictures);
     pictures
+}
+
+pub fn omit_removed(pictures: &mut Vec<Picture>, removed: &HashSet<String>) {
+    if removed.is_empty() {
+        return;
+    }
+    pictures.retain(|picture| match picture.path.to_str() {
+        Some(path) => !removed.contains(path),
+        None => true,
+    });
+    arrange_pictures(pictures);
 }
 
 pub fn arrange_pictures(pictures: &mut Vec<Picture>) {
@@ -846,6 +857,31 @@ mod tests {
         assert!(is_video(Path::new("clip.webm")));
         assert!(!is_video(Path::new("still.png")));
         assert_eq!(pictures[1].captured_at.timestamp(), 8_000);
+    }
+
+    #[test]
+    fn leaves_a_removed_video_out_of_the_next_scan() {
+        let root = std::env::temp_dir().join(format!("timeline-removed-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("clip.mp4"), b"clip").unwrap();
+        fs::write(root.join("still.png"), b"still").unwrap();
+        let mut pictures = scan_folder(&root, &HashMap::new());
+        let clip = pictures
+            .iter()
+            .find(|picture| picture.name == "clip.mp4")
+            .unwrap()
+            .path
+            .to_str()
+            .unwrap()
+            .to_string();
+        let mut removed = std::collections::HashSet::new();
+        removed.insert(clip);
+        omit_removed(&mut pictures, &removed);
+        assert!(root.join("clip.mp4").is_file());
+        assert_eq!(pictures.len(), 1);
+        assert_eq!(pictures[0].name, "still.png");
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

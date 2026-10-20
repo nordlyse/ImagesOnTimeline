@@ -64,6 +64,8 @@ Supported pictures are JPEG, PNG, GIF, WebP, BMP, TIFF, HEIC, HEIF, and AVIF. A 
 
 `GET /api/pictures/file?name=photo.jpg` downloads that one file. The name is the file name from the list above, and it may be a video such as `clip.mp4`. When more than one file has that name, nothing is downloaded.
 
+`DELETE /api/pictures/2` removes that picture or video from the timeline. `DELETE /api/pictures/file?name=clip.mp4` removes the one file with that name. The file stays in the folder. A later scan does not put it back. When more than one file has that name, nothing is removed.
+
 ## Moving along the strip
 
 The current picture or video stays in the center. The timeline under it shows that item's date, with the first and last dates at the ends. When it has a place name, that place is shown under the date. A colored light lies behind that timeline, and the slider sits in the middle of the light. The slider is solid, so the colors show around it. A brighter step travels to the right, then back to the left, and keeps going.

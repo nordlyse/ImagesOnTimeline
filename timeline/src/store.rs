@@ -30,6 +30,14 @@ CREATE TABLE IF NOT EXISTS folder_scan (
   PRIMARY KEY(folder)
 )";
 
+const PREPARE_REMOVED: &str = "\
+CREATE TABLE IF NOT EXISTS picture_removed (
+  folder STRING,
+  file_path STRING,
+  ts TIMESTAMP TIME INDEX,
+  PRIMARY KEY(folder, file_path)
+)";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FolderScan {
     pub folder: String,
@@ -99,7 +107,8 @@ impl Catalog {
 impl Session {
     pub fn prepare(&mut self) -> Result<(), String> {
         self.query(PREPARE_PICTURES)?;
-        self.query(PREPARE_FOLDERS).map(|_| ())
+        self.query(PREPARE_FOLDERS)?;
+        self.query(PREPARE_REMOVED).map(|_| ())
     }
 
     pub fn load_latest_scan(&mut self) -> Result<Option<FolderScan>, String> {
@@ -116,6 +125,56 @@ impl Session {
         );
         let rows = self.query(&sql)?;
         Ok(rows.into_iter().find_map(|row| parse_scan(&row)))
+    }
+
+    pub fn load_removed(&mut self, folder: &str) -> Result<HashSet<String>, String> {
+        let sql = format!(
+            "SELECT file_path FROM picture_removed WHERE folder = {} ORDER BY ts DESC",
+            sql_string(folder)
+        );
+        let rows = self.query(&sql)?;
+        let mut removed = HashSet::new();
+        for row in rows {
+            if let Some(path) = row
+                .first()
+                .and_then(|value| value.clone())
+                .filter(|value| !value.is_empty())
+            {
+                removed.insert(path);
+            }
+        }
+        Ok(removed)
+    }
+
+    pub fn remove_picture(&mut self, folder: &str, path: &str) -> Result<(), String> {
+        self.query(&format!(
+            "DELETE FROM picture WHERE folder = {} AND file_path = {}",
+            sql_string(folder),
+            sql_string(path)
+        ))?;
+        let recorded = Utc::now().format("%Y-%m-%d %H:%M:%S");
+        self.query(&format!(
+            "INSERT INTO picture_removed (folder, file_path, ts) VALUES ({}, {}, '{recorded}')",
+            sql_string(folder),
+            sql_string(path)
+        ))
+        .map(|_| ())
+    }
+
+    pub fn save_picture_count(
+        &mut self,
+        folder: &str,
+        scanned_at: DateTime<Utc>,
+        picture_count: i64,
+    ) -> Result<(), String> {
+        let when = scanned_at.format("%Y-%m-%d %H:%M:%S");
+        let recorded = Utc::now().format("%Y-%m-%d %H:%M:%S");
+        let sql = format!(
+            "INSERT INTO folder_scan (folder, scanned_at, picture_count, ts) VALUES ({}, '{when}', {}, '{recorded}')",
+            sql_string(folder),
+            picture_count.max(0)
+        );
+        self.query(&sql).map(|_| ())
     }
 
     pub fn clear_pictures(&mut self, folder: &str) -> Result<(), String> {
@@ -272,6 +331,10 @@ impl Session {
     #[cfg(test)]
     pub fn remove_folder(&mut self, folder: &str) -> Result<(), String> {
         self.query(&format!("DELETE FROM picture WHERE folder = {}", sql_string(folder)))?;
+        self.query(&format!(
+            "DELETE FROM picture_removed WHERE folder = {}",
+            sql_string(folder)
+        ))?;
         self.query(&format!("DELETE FROM folder_scan WHERE folder = {}", sql_string(folder)))
             .map(|_| ())
     }
@@ -572,5 +635,41 @@ mod tests {
         assert_eq!(pictures[0].name, "kept.jpg");
         assert_eq!(pictures[0].place.as_deref(), Some("Istanbul"));
         assert!(session.load_scan(&folder).unwrap().is_none());
+    }
+
+    #[test]
+    fn removes_a_stored_picture_when_the_database_is_set() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let catalog = Catalog::parse(&url).expect("database address");
+        let folder = format!("/tmp/timeline-removed-{}", std::process::id());
+        let path = format!("{folder}/clip.mp4");
+        let picture = Picture {
+            id: 1,
+            path: PathBuf::from(&path),
+            captured_at: parse_timestamp("2012-12-06 15:46:01").unwrap(),
+            name: "clip.mp4".to_string(),
+            latitude: None,
+            longitude: None,
+            place: None,
+        };
+        let mut session = catalog.open().expect("database connection");
+        session.prepare().unwrap();
+        session.remove_folder(&folder).unwrap();
+        session.save_pictures(&folder, &[&picture]).unwrap();
+        let scanned_at = parse_timestamp("2015-01-01 00:00:00").unwrap();
+        session.save_scan(&folder, scanned_at, 1).unwrap();
+        session.remove_picture(&folder, &path).unwrap();
+        session.save_picture_count(&folder, scanned_at, 0).unwrap();
+        let pictures = session.load_pictures(&folder).unwrap();
+        let removed = session.load_removed(&folder).unwrap();
+        let scan = session.load_scan(&folder).unwrap().expect("stored folder");
+        session.remove_folder(&folder).unwrap();
+        assert!(pictures.is_empty());
+        assert!(removed.contains(&path));
+        assert_eq!(scan.picture_count, 0);
+        assert_eq!(scan.scanned_at, scanned_at);
+        assert!(session.load_removed(&folder).unwrap().is_empty());
     }
 }

@@ -1525,4 +1525,95 @@ mod tests {
         let unnamed = delete(&state, "/api/pictures/file", "");
         assert_eq!(unnamed.status, 400);
     }
+
+    #[test]
+    fn delete_removes_a_video_by_its_id() {
+        let root = std::env::temp_dir().join(format!("timeline-id-video-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let still_path = root.join("still.png");
+        let clip_path = root.join("clip.mp4");
+        std::fs::write(&still_path, b"still-bytes").unwrap();
+        std::fs::write(&clip_path, b"0123456789").unwrap();
+        let mut still = sample("still.png", "2006-07-22T00:05:07Z");
+        still.id = 1;
+        still.path = still_path;
+        let mut clip = sample("clip.mp4", "2012-12-06T15:46:01Z");
+        clip.id = 2;
+        clip.path = clip_path.clone();
+        let state = state_with(root.clone(), vec![still, clip]);
+        let response = delete(&state, "/api/pictures/2", "");
+        assert_eq!(response.status, 200);
+        assert_eq!(body(response), "{\"id\":2,\"name\":\"clip.mp4\"}");
+        assert_eq!(body(get(&state, "/api/pictures/names", "")), "[\"still.png\"]");
+        let ranged = get(&state, "/api/pictures/names", "from=2012-12-06&to=2012-12-06");
+        assert_eq!(body(ranged), "[]");
+        let listed = body(get(&state, "/api/pictures", ""));
+        assert!(listed.contains("\"id\":1"));
+        assert!(listed.contains("\"video\":false"));
+        assert!(!listed.contains("clip.mp4"));
+        assert_eq!(get(&state, "/api/pictures/2/file", "").status, 404);
+        let picture = get(&state, "/api/pictures/1/file", "");
+        assert_eq!(picture.status, 200);
+        assert_eq!(picture.content_type, "image/png");
+        assert_eq!(picture.body, b"still-bytes");
+        assert_eq!(std::fs::read(&clip_path).unwrap(), b"0123456789");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn delete_keeps_the_other_video() {
+        let root = std::env::temp_dir().join(format!("timeline-two-videos-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let first_path = root.join("clip-a.mp4");
+        let second_path = root.join("clip-b.webm");
+        std::fs::write(&first_path, b"aaaa").unwrap();
+        std::fs::write(&second_path, b"bbbb").unwrap();
+        let mut first = sample("clip-a.mp4", "2012-12-06T15:46:01Z");
+        first.id = 1;
+        first.path = first_path.clone();
+        let mut second = sample("clip-b.webm", "2014-03-22T18:04:05Z");
+        second.id = 2;
+        second.path = second_path.clone();
+        let state = state_with(root.clone(), vec![first, second]);
+        let response = delete(&state, "/api/pictures/file", "name=clip-b.webm");
+        assert_eq!(response.status, 200);
+        assert_eq!(body(get(&state, "/api/pictures/names", "")), "[\"clip-a.mp4\"]");
+        let listed = body(get(&state, "/api/pictures", ""));
+        assert!(listed.contains("\"id\":1"));
+        assert!(listed.contains("\"name\":\"clip-a.mp4\""));
+        assert!(listed.contains("\"video\":true"));
+        assert!(!listed.contains("clip-b.webm"));
+        assert_eq!(std::fs::read(&first_path).unwrap(), b"aaaa");
+        assert_eq!(std::fs::read(&second_path).unwrap(), b"bbbb");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn delete_reads_an_encoded_video_name() {
+        let root = std::env::temp_dir().join(format!("timeline-encoded-name-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("my clip.mp4");
+        std::fs::write(&file, b"clip-bytes").unwrap();
+        let mut clip = sample("my clip.mp4", "2012-12-06T15:46:01Z");
+        clip.path = file.clone();
+        let state = state_with(root.clone(), vec![clip]);
+        let response = delete(&state, "/api/pictures/file", "name=my%20clip.mp4");
+        assert_eq!(response.status, 200);
+        assert_eq!(body(response), "{\"id\":1,\"name\":\"my clip.mp4\"}");
+        assert_eq!(body(get(&state, "/api/pictures/names", "")), "[]");
+        assert_eq!(std::fs::read(&file).unwrap(), b"clip-bytes");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn delete_ignores_a_request_that_is_not_delete() {
+        let (state, root) = video_library("keep.mp4", b"0123456789");
+        let posted = call(&state, "POST", "/api/pictures/2", "");
+        assert_eq!(posted.status, 404);
+        let posted_name = call(&state, "POST", "/api/pictures/file", "name=keep.mp4");
+        assert_eq!(posted_name.status, 404);
+        assert_eq!(body(get(&state, "/api/pictures/names", "")), "[\"still.png\",\"keep.mp4\"]");
+        assert_eq!(std::fs::read(root.join("keep.mp4")).unwrap(), b"0123456789");
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
